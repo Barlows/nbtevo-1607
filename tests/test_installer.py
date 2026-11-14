@@ -89,6 +89,8 @@ class Base(object):
             lines[matches[0]] = key + '=' + shlex.quote(str(value))
         (pw,) = [n for n, line in enumerate(lines) if line.startswith('SSH_PASSWORD=')]
         lines[pw] = "SSH_PASSWORD='pw & for tests'"
+        (rw,) = [n for n, line in enumerate(lines) if line.startswith('RESTART_WAIT=')]
+        lines[rw] = 'RESTART_WAIT=0'                                     # the stand-in appreset "restarts" at once
         start = lines.index('supported_table() {') + 2                   # after "cat <<'EOF'"
         end = lines.index('EOF', start)
         lines[start:end] = TABLE
@@ -250,6 +252,39 @@ class InstallTest(Base):
         # boot hook added and the relink made mm-ipod a link to the wrapper
         self.assertEqual(self.hooked(), 1)
         self.assertTrue(self.p['MMIPOD'].is_symlink())
+
+    def test_install_hud_through_a_linked_rw(self):
+        # iDrive 5 (HMI 1803): /var/opt/hmi/data/rw is a link to the disk folder, and a first install has no Plugins/ there. QNX
+        # mkdir -p fails with "File exists" when its last path is a link to an existing folder (checked in IDEmu); the stand-in does so.
+        rw = self.p['SETTINGS'].parent
+        disk = rw.parent / 'ID5'
+        rw.rename(disk)
+        shutil.rmtree(disk / 'Plugins')
+        rw.symlink_to(disk)
+        self.stub('mkdir', 'if [ "$1" = -p ]; then for a; do last=$a; done\n'
+                  '  if [ -L "$last" ]; then echo "mkdir: $last: File exists" >&2; exit 1; fi\n'
+                  'fi\nexec /bin/mkdir "$@"')
+        out = self.run_script('install', '--kind', 'id5', '--mode', 'hud')
+        self.assertIn('SUCCESS: install completed', out)
+        self.assertNotIn('File exists', out)
+        self.assertTrue(rw.is_symlink())
+        self.assertTrue((disk / 'Plugins/CarPlayMenu/librghook.so').exists())
+        self.assertTrue((disk / 'carplaymenu/mm-ipod').exists())
+        self.assertTrue(self.p['MMIPOD'].is_symlink())
+
+    def test_scanned_needs_a_build_tab_for_this_hmi(self):
+        out = self.run_script('install', '--hmi', 'scanned', rc=1)
+        self.assertIn('--hmi scanned needs', out)
+        (self.pl / 'build.tab').write_text('hmi another build\ntouchFn 1\n')
+        self.assertIn('build.tab is for another HMI build', self.run_script('install', '--hmi', 'scanned', rc=1))
+        self.assertFalse(self.p['PLUGIN'].exists())
+        tab = 'hmi %s\ntouchFn 43c02c\n' % HMI_VERSION.decode()
+        (self.pl / 'build.tab').write_text(tab)
+        out = self.run_script('install', '--hmi', 'scanned')
+        self.assertIn('SUCCESS: install completed', out)
+        self.assertEqual((self.p['PLUGIN'] / 'build.tab').read_text(), tab)
+        out = self.run_script('install')                                               # a known build again: no build.tab
+        self.assertFalse((self.p['PLUGIN'] / 'build.tab').exists())
 
     def test_full_stack_on_id6_needs_no_hash(self):
         # the full plugin can still be forced on iDrive 6 (the plugin self-detects; no hash is required there).
@@ -433,6 +468,41 @@ class InstallTest(Base):
         self.assert_plugin()
         self.assertFalse(self.p['LOCK'].exists())
 
+    def test_restart_finds_onoff_outside_the_path(self):
+        # on the car the SSH shell's PATH has no /opt/core/bin: the installer looks there itself (ONOFF_BINS)
+        (self.bin / 'OnOffDSICommander').rename(self.root / 'OnOffDSICommander')
+        self.script.write_text(self.script.read_text().replace(
+            "ONOFF_BINS='/opt/core/bin/OnOffDSICommander /opt/car/bin/OnOffDSICommander'",
+            "ONOFF_BINS='/nonexistent/OnOffDSICommander %s'" % (self.root / 'OnOffDSICommander')))
+        out = self.run_script('restart')
+        self.assertIn('Restarting the head unit (%s appreset)' % (self.root / 'OnOffDSICommander'), out)
+        self.assertIn('appreset appreset', self.calls())
+
+    def test_restart_with_onoff_on_jacinto(self):
+        # HMI 1703: only hu-jacinto has it (/opt/car/bin); hu-omap runs it there with on -f hu-jacinto
+        (self.bin / 'OnOffDSICommander').unlink()
+        j = self.root / 'net/hu-jacinto/opt/car/bin/OnOffDSICommander'
+        j.parent.mkdir(parents=True)
+        j.write_text('#!/bin/sh\necho "jacinto appreset $*" >> "$TEST_CALLS"\n')
+        j.chmod(0o755)
+        self.script.write_text(self.script.read_text().replace('ONOFF_JACINTO=/net/hu-jacinto/', 'ONOFF_JACINTO=%s/net/hu-jacinto/' % self.root))
+        self.stub('on', 'echo "on $*" >> "$TEST_CALLS"\n'
+                  '[ "$1" = -f ] && [ "$2" = hu-jacinto ] || exit 90\nshift 2; prog=$1; shift\n'
+                  'exec "$TEST_ROOT/net/hu-jacinto$prog" "$@"')
+        out = self.run_script('restart')
+        self.assertIn('Restarting the head unit (on -f hu-jacinto /opt/car/bin/OnOffDSICommander appreset)', out)
+        self.assertIn('jacinto appreset appreset', self.calls())
+
+    def test_restart_falls_back_to_libcpreboot(self):
+        self.run_script('install')
+        out = self.run_script('restart', rc=3, TEST_HMI_RC=1)                         # appreset fails: libcpreboot.so next
+        self.assertIn('appreset did not restart the head unit; restarting with', out)
+        self.assertIn('reboot did not happen', out)
+        # appreset returns 0 but the unit is still up after RESTART_WAIT: libcpreboot.so too
+        self.script.write_text(self.script.read_text().replace('RESTART_WAIT=0', 'RESTART_WAIT=1'))
+        out = self.run_script('restart', rc=3)
+        self.assertIn('appreset did not restart the head unit; restarting with', out)
+
     def test_restart_action(self):
         self.assertIn('would be restarted', self.run_script('restart', '--dry-run'))
         self.assertNotIn('appreset', ' '.join(self.calls()))
@@ -535,6 +605,79 @@ class FromComputerTest(Base):
         self.assertIn('not in the supported list', out)
         self.assertIn('Plugin: not installed', out)
 
+    def unknown_scannable(self):
+        version = b'NBTevo_ID5_1803_Release ID5_1803-510-1749I Build 66'
+        self.p['HMI_VERSION_FILE'].write_bytes(version)
+        elf, want = synth_hmi()
+        self.p['HMI_BIN'].write_bytes(elf)
+        return version.decode(), elf, want
+
+    def issue_link(self, out):
+        (link,) = [l.strip() for l in out.splitlines() if l.strip().startswith('https://github.com/')]
+        return urllib.parse.parse_qs(urllib.parse.urlsplit(link).query)
+
+    def test_unknown_build_is_scanned_and_installed_with_yes(self):
+        version, elf, want = self.unknown_scannable()
+        out = self.computer('install', '--yes')
+        self.assertIn('This HMI build is not supported yet: ' + version, out)
+        self.assertIn('Installing with the scanned addresses (--yes)', out)
+        self.assertIn('not yet supported: addresses from the HMI scan', out)
+        self.assertIn('Done: CarPlay Advanced Settings is installed', out)
+        tab = (self.p['PLUGIN'] / 'build.tab').read_text().splitlines()
+        self.assertEqual(tab[0], 'hmi ' + version)
+        self.assertEqual(tab[1:], want)
+        q = self.issue_link(out)
+        self.assertEqual(q['title'], ['Scanned HMI ' + version])
+        body = q['body'][0].splitlines()
+        self.assertIn('HmiMain3D sha256: %s' % sha(elf), body)
+        self.assertIn(want[0], body)                                                 # the addresses
+        self.assertIn('scan sha256: %s' % sha(('\n'.join(l for l in want if not l.startswith('#')) + '\n').encode()), body)
+
+    def test_unknown_build_scanned_needs_a_yes(self):
+        self.unknown_scannable()
+        out = self.computer('install', rc=1)                                           # no terminal, no --yes
+        self.assertIn('This HMI build is not supported yet', out)
+        self.assertIn('run again on a terminal (or with --yes)', out)
+        self.assertFalse(self.p['STAGE'].exists())                                    # nothing uploaded
+        self.assertFalse(self.p['PLUGIN'].exists())
+        self.assertEqual(self.issue_link(out)['title'][0][:12], 'Scanned HMI ')
+        out = self.computer('install', '--dry-run')                                    # a dry run needs no yes
+        self.assertIn('DRY RUN', out)
+
+    def test_known_build_runs_the_scan_check(self):
+        # the made-up HmiMain3D of the tests is no ELF: the check cannot agree, which is a note only (the built-in table is used)
+        out = self.computer('install')
+        self.assertIn('Supported software: TEST_006', out)
+        self.assertIn('The HMI scan does not agree with the built-in table for TEST_006', out)
+        self.assertIn('Done: CarPlay Advanced Settings is installed', out)
+        self.assertFalse((self.p['PLUGIN'] / 'build.tab').exists())
+
+    def test_mmipod_unknown_is_a_note(self):
+        mm = sha(elf(b'mm-ipod', etype=2))
+        out = self.computer('install')
+        self.assertIn('mm-ipod is not one we know (sha256 %s)' % mm, out)
+        self.assertIn('Done: CarPlay Advanced Settings is installed', out)
+
+    def test_mmipod_known(self):
+        mm = sha(elf(b'mm-ipod', etype=2))
+        s = self.script.read_text()
+        start = s.index("mmipod_table() {\n    cat <<'EOF'\n") + len("mmipod_table() {\n    cat <<'EOF'\n")
+        self.script.write_text(s[:start] + '%s  TEST_006 TEST_1703\n' % mm + s[start:])
+        self.assertIn('mm-ipod is a known one (TEST_006, TEST_1703)', self.computer('install', '--dry-run'))
+
+    def test_mmipod_hashed_from_the_kept_copy_when_linked(self):
+        mm = sha(elf(b'mm-ipod', etype=2))
+        self.computer('install', '--hud')
+        self.assertTrue(self.p['MMIPOD'].is_symlink())                                # now the wrapper
+        out = self.computer('status')
+        self.assertIn('mm-ipod is not one we know (sha256 %s)' % mm, out)              # the original, not the wrapper script
+
+    def test_unsupported_report_has_the_mmipod_hash(self):
+        self.p['HMI_VERSION_FILE'].write_bytes(b'NBTevo_ID5_1903_Release ID5_1903-999 Build 12')
+        self.p['HMI_BIN'].write_bytes(b'HmiMain3D other')
+        out = self.computer('install', rc=1)
+        self.assertIn('mm-ipod sha256: %s' % sha(elf(b'mm-ipod', etype=2)), self.issue_link(out)['body'][0].splitlines())
+
     def test_missing_library_is_unsupported(self):
         self.p['CONN_LIB'].unlink()
         out = self.computer('install', rc=1)
@@ -573,6 +716,51 @@ class FromComputerTest(Base):
         self.assertLess(out.index('Backup copied'), out.index('Restarting the head unit'))
         self.assertTrue(any((self.root / 'BACKUP').glob('*-install/COMMITTED')))
 
+    def test_files_copied_here_before_the_upload(self):
+        out = self.computer('install')
+        self.assertLess(out.index('Copying the head unit files this run may change'), out.index('Uploading the plugin'))
+        (pre,) = (self.root / 'BACKUP').glob('*-install-before')
+        self.assertEqual((pre / ('system' + str(self.p['START_SCREEN']))).read_bytes(), START_SCREEN)   # as it was: no hook line
+        self.assertEqual((pre / ('system' + str(self.p['MMIPOD']))).read_bytes(), elf(b'mm-ipod', etype=2))
+        manifest = (pre / 'manifest.txt').read_text()
+        self.assertIn('absent  %s' % self.p['PLUGIN'], manifest)                       # first install
+        self.assertIn('Before', out)
+        # the next run copies the installed plugin first; the plugin's own links are named, not copied
+        self.computer('uninstall')
+        self.computer('install', '--hud')
+        out = self.computer('install')                                                 # (a second --hud on top of one stops at the link)
+        pre = sorted((self.root / 'BACKUP').glob('*-install-before'))[-1]
+        manifest = (pre / 'manifest.txt').read_text()
+        self.assertIn('folder  %s' % self.p['PLUGIN'], manifest)
+        self.assertIn('link    %s' % self.p['MMIPOD'], manifest)
+        self.assertTrue((pre / ('folders' + str(self.p['SETTINGS'])) / 'bin' / 'mm-ipod').is_file())   # its original
+
+    def test_failed_copy_stops_before_the_upload(self):
+        (self.root / 'BACKUP').write_text('not a folder')
+        out = self.computer('install', rc=1)
+        self.assertIn('nothing was sent to the head unit or changed', out)
+        self.assertFalse(self.p['STAGE'].exists())
+        self.assertFalse(self.p['PLUGIN'].exists())
+        self.assertEqual(self.hooked(), 0)
+
+    def test_dry_run_copies_nothing(self):
+        self.computer('install', '--dry-run')
+        self.assertFalse(list((self.root / 'BACKUP').glob('*-before')))
+
+    def test_restart_without_the_plugin_sends_libcpreboot(self):
+        (self.bin / 'OnOffDSICommander').unlink()                      # and no plugin installed: the computer sends libcpreboot.so
+        out = self.computer('restart', rc=3)                           # the host's cat ignores the preload: "did not happen"
+        self.assertNotIn('Neither OnOffDSICommander nor libcpreboot.so', out)
+        self.assertIn('libcpreboot.so', out)
+        self.assertIn('reboot did not happen', out)
+
+    def test_hud_install_offers_the_restart(self):
+        out = self.computer('install', '--hud')
+        self.assertIn('A restart of the head unit is needed', out)
+        self.assertIn('for the HUD-only', out)
+        self.assertIn('sh carplay-advanced.sh restart', out)                           # no terminal: how to restart later
+        self.assertTrue((self.p['PLUGIN'] / 'libcpreboot.so').is_file())               # "restart" works without OnOffDSICommander
+
     def test_restart_does_not_wait_for_the_dropped_connection(self):
         # a real reboot leaves the SSH session hanging until a timeout: the installer stops once the head unit says it restarts
         import time
@@ -609,7 +797,8 @@ class FromComputerTest(Base):
         self.assertIn('Root SSH access could not be verified', out)
         self.assertIn('reported a failure (exit 1)', out)
         self.assertFalse(self.p['STAGE'].exists())
-        self.assertFalse((self.root / 'BACKUP').exists())
+        # only the copy made before the upload; the head unit wrote no backup of its own
+        self.assertEqual([d.name.endswith('-install-before') for d in (self.root / 'BACKUP').iterdir()], [True])
 
     def test_missing_plugin_file(self):
         (self.pl / 'libcppinch.so').unlink()
@@ -809,7 +998,7 @@ class ClusterTest(Base):
     def test_hud_only_most(self):
         out = self.hud_only('kombi=0 refused or unreachable')
         self.assertIn('most: CarPlay directions on the MOST HUDTerminal (librghook-most.so)', out)
-        self.assertIn('Drawn on MOST from mm-ipod (no menu plugin)', out)
+        self.assertIn('Drawn on MOST from mm-ipod (without the full plugin)', out)
         self.assertEqual(self.rghook(), 'librghook-most.so')
         self.assertTrue((self.p['PLUGIN'] / 'libcpprobe.so').exists())
 
@@ -829,6 +1018,186 @@ class ClusterTest(Base):
         self.assertIn('Ethernet KOMBI found', out)
         self.assertIsNone(self.cluster())
         self.assertFalse(self.p['PLUGIN'].exists())
+
+
+def hmi_patterns(script=SOURCE):
+    s = Path(script).read_text()
+    head = "hmi_patterns() {\n    cat <<'EOF'\n"
+    start = s.index(head) + len(head)
+    return s[start:s.index('EOF\n}\n', start)].splitlines()
+
+
+def scanner(script=SOURCE):
+    """The installer's hmi_patterns and hmi_scan functions, to source on their own."""
+    lines, out, on, sc = Path(script).read_text().splitlines(), [], False, False
+    for l in lines:
+        on = on or l.startswith('hmi_patterns() {')
+        if on:
+            out.append(l)
+        sc = sc or l.startswith('hmi_scan() {')
+        if sc and l == '}':
+            break
+    return '\n'.join(out) + '\n'
+
+
+def b_word(at, to, op='ea'):
+    return '%s%06x' % (op, ((to - at - 8) // 4) & 0xffffff)
+
+
+def synth_hmi(omit=(), twice=(), base=0x10000):
+    """A made-up HmiMain3D: every "find" window of the installer's patterns laid out once (no firmware), the masked words filled
+    in so that the values are known. Returns the ELF bytes and the build.tab lines (without hmi) the scanner must print."""
+    finds, patches = {}, []
+    for l in hmi_patterns():
+        f = l.split()
+        if f and f[0] == 'find':
+            to = [t for t in f[4:] if t.startswith('to:')]
+            finds[f[1]] = (int(f[2]), [t for t in f[4:] if not t.startswith('to:')], to[0].split(':')[1:] if to else None)
+        elif f and f[0] == 'patch':
+            patches.append(f[1:])
+    # windows that are the same code in the real builds (ctl lies inside tB) are overlaid where all their words agree
+    cells, anchor, filled = {}, {}, {}
+    fields = {'touch': (10, 0x24), 'tdfirst': (0, 0x10), 'tdend': (0, 0x14)}
+
+    def fits(a, b):
+        return all(x == '.' or y == '.' or x == y for x, y in zip(a, b))
+
+    def merge(a, b):
+        return ''.join(y if x == '.' else x for x, y in zip(a, b))
+
+    def lay(name, decoy=False):
+        idx, toks, _ = finds[name]
+        top = max(cells) + 1 if cells else 0
+        best, start = 0, top + 4                                  # appended after a gap no pattern matches
+        if not decoy:
+            for p in range(0, top):
+                if all(cells.get(p + k) is None or fits(cells[p + k], t) for k, t in enumerate(toks)):
+                    shared = sum(1 for k, t in enumerate(toks) if p + k in cells and '.' not in t and '.' not in cells[p + k])
+                    if shared > best and shared >= 3:
+                        best, start = shared, p
+        for k in range(top, start):
+            cells[k] = 'ffffffff'
+        for k, t in enumerate(toks):
+            cells[start + k] = merge(cells[start + k], t) if start + k in cells else t
+        if not decoy:
+            anchor[name] = base + 4 * (start + idx)
+            filled[name] = (start, idx)
+
+    for name in sorted(finds, key=lambda n: -len(finds[n][1])):  # the longest first: shorter ones overlay them
+        if name not in omit:
+            lay(name)
+        if name in twice:
+            lay(name, decoy=True)
+    words = [int(cells.get(k, 'ffffffff').replace('.', '0'), 16) for k in range(max(cells) + 1)]
+    for name, (k, v) in fields.items():
+        if name in filled:
+            s0, idx = filled[name]
+            words[s0 + idx + k] = (words[s0 + idx + k] & 0xfffff000) | v
+    calls = {}
+    for name in ('ctl', 'play'):                                 # the calls: a BL to a place of our choice
+        if name in anchor:
+            calls[name] = anchor[name] + 0x40000
+            s, idx = filled[name]
+            words[s + idx] = int(b_word(anchor[name], calls[name], 'eb'), 16)
+    for name, (idx, toks, to) in finds.items():                  # a branch that must go to another anchor
+        if to and name in anchor and to[1] in anchor:
+            s, i = filled[name]
+            k = int(to[0])
+            words[s + k] = int(b_word(base + 4 * (s + k), anchor[to[1]]), 16)
+    text = struct.pack('<%dI' % len(words), *words)
+    hdr = bytearray(52)
+    hdr[:7] = b'\x7fELF\x01\x01\x01'
+    struct.pack_into('<HHIIIIIHHHHHH', hdr, 16, 2, 40, 1, base, 52, 0, 0, 52, 32, 1, 0, 0, 0)
+    ph = struct.pack('<8I', 1, 0x1000, base, base, len(text), len(text), 5, 0x1000)
+    elf = bytes(hdr) + ph + bytes(0x1000 - 52 - 32) + text
+    word_at = lambda a: words[(a - base) // 4]
+    if any(n not in anchor for n in ('touch', 'tdfirst', 'tdend', 'ctl', 'play')):
+        return elf, None
+    fs = all(p[1] in anchor for p in patches if p[0] == 'fs')
+    tilt = all(p[1] in anchor for p in patches if p[0] == 'tilt')
+    out = ['touchFn %x' % anchor['touch'], 'ctlSetFn %x' % calls['ctl'], 'ctlProxy 4e60', 'playFn %x' % calls['play'], 'playObj 52b0',
+           'tdFirst 10', 'tdEnd 14', 'tdTime 20', 'tdOrigin 24', 'pbw %d' % (1 if fs else 2), 'pbwBmw %d' % (1 if fs else 2), 'ini 1']
+    for g, an, off, new, mode in patches:
+        if (g == 'fs' and not fs) or (g == 'tilt' and not tilt):
+            continue
+        a = anchor[an] + int(off, 16)
+        o = '%08x' % word_at(a)
+        if mode == 'imm24':
+            new = new[:2] + o[2:]
+        elif mode.startswith('b:'):
+            other, d = mode[2:].split('+')
+            new = b_word(a, anchor[other] + int(d, 16), new[:2])
+        out.append('%s %x %s %s' % (g, a, o, new))
+    if not tilt:
+        out.append('# tilt: not found (knob tilts off)')
+    if not fs:
+        out.append('# fs: no CARPLAY_FULLSCREEN flag code (full screen by the layout only)')
+    return elf, out
+
+
+class HmiScanTest(unittest.TestCase):
+    """hmi_scan (od + awk) on made-up HmiMain3D files built from its own patterns, and on the real builds when they are given."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='cpa-scan-')
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        (self.dir / 'scan.sh').write_text(scanner())
+
+    def scan(self, elf_bytes=None, path=None, rc=0):
+        if path is None:
+            path = self.dir / 'HmiMain3D'
+            path.write_bytes(elf_bytes)
+        res = subprocess.run(['/bin/sh', '-c', '. "$1"; hmi_scan "$2" "HMI test build"', 'sh', str(self.dir / 'scan.sh'), str(path)],
+                             capture_output=True, timeout=600)
+        self.assertEqual(res.returncode, rc, res.stderr.decode())
+        return res.stdout.decode().splitlines(), res.stderr.decode()
+
+    def test_all_found(self):
+        elf, want = synth_hmi()
+        out, _ = self.scan(elf)
+        self.assertEqual(out[0], 'hmi HMI test build')
+        self.assertEqual(out[1:], want)
+        self.assertTrue(any(l.startswith('fs ') for l in out) and any(l.startswith('tilt ') for l in out))
+
+    def test_branch_constraint_picks_the_right_copy(self):
+        elf, want = synth_hmi(twice=('tC',))                     # a second tC window whose branch goes elsewhere
+        self.assertEqual(self.scan(elf)[0][1:], want)
+
+    def test_without_fullscreen_code_and_tilts(self):
+        elf, want = synth_hmi(omit=('f3', 'tC'))
+        out, _ = self.scan(elf)
+        self.assertEqual(out[1:], want)
+        self.assertIn('pbw 2', out)
+        self.assertFalse([l for l in out if l.startswith(('fs ', 'tilt '))])
+
+    def test_missing_or_twice_is_not_found(self):
+        elf, _ = synth_hmi(omit=('play',))                      # (ctl is inside tB's window, as in the real builds)
+        self.assertIn('not found: play', self.scan(elf, rc=1)[1])
+        elf, _ = synth_hmi(twice=('touch',))
+        self.assertIn('not found: touch', self.scan(elf, rc=1)[1])
+
+    def test_not_an_elf(self):
+        self.assertIn('not a little-endian ELF32', self.scan(b'HmiMain3D 006', rc=1)[1])
+
+    @unittest.skipUnless(os.environ.get('CPA_HMI_006') and os.environ.get('CPA_HMI_1703'),
+                         'CPA_HMI_006 / CPA_HMI_1703: the plain HmiMain3D of 006_017_006 and 1703 Build 139')
+    def test_known_builds(self):
+        table = {}
+        s = SOURCE.read_text()
+        for l in s[s.index('supported_table() {'):].splitlines()[2:]:
+            if l == 'EOF':
+                break
+            f = l.split()
+            if len(f) == 3 and f[1] == 'scan':
+                table[f[0]] = f[2]
+        for env, build, name in (('CPA_HMI_006', '006_017_006', 'ID5_1803-510-1749MA_Build_71'),
+                                 ('CPA_HMI_1703', '1703 Build 139', 'ID5_1703-490-1650ZD_Build_139')):
+            out, _ = self.scan(path=os.environ[env])
+            want = subprocess.run(['python3', str(HERE / 'tools/hmipatterns.py'), '--expect', build], capture_output=True,
+                                  check=True).stdout.decode().splitlines()
+            body = [l for l in out[1:] if not l.startswith('#')]
+            self.assertEqual(body, want, build)
+            self.assertEqual(sha(('\n'.join(body) + '\n').encode()), table[name], build)
 
 
 def per_shell(cls):
