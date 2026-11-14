@@ -129,8 +129,8 @@ It then:
 1. checks the plugin files, and that the head unit answers;
 2. reads the HMI; for the full plugin on iDrive 5 it identifies the software by hash and searches it for the places the plugin uses
    (an unknown build where the search finds everything asks first; otherwise it stops here, with nothing changed);
-3. asks **Proceed?**, uploads the plugin and backs up every file it will replace (on the head unit, and a copy in `BACKUP/` on your
-   computer);
+3. asks **Proceed?**, copies every file it may replace to `BACKUP/` on your computer *before* it uploads anything, then uploads the
+   plugin and backs those files up on the head unit too (copied to `BACKUP/` as well afterwards);
 4. installs, prints a summary of what is on the head unit now, and offers to **restart** it.
 
 After the restart: **Media/Radio > CarPlay Advanced Settings**. On a first install all options are off; a reinstall keeps them.

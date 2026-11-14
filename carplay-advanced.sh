@@ -50,16 +50,26 @@ CARPLAY_INI=/opt/conn/data/carplay/carplay.ini
 NBT_AAD_PLUGIN=/opt/hmi/ID5/data/ro/Plugins/NbtAad
 BACKUPS=/var/opt/carplay-advanced-backups
 LOCK=/var/opt/carplay-advanced.lock
+# OnOffDSICommander (the head unit's own lifecycle tool; "appreset" = an application reset, the normal restart). It is not on the
+# PATH of an SSH shell: the 1803 image has it in /opt/core/bin and /opt/car/bin; on HMI 1703 (MINI F54) it is on hu-jacinto only
+# (/opt/car/bin), run from hu-omap with on -f. Its other commands (boloreset, transport, flash, garage, ...) switch the unit into
+# bootloader or persistent modes: only appreset is ever used.
+ONOFF_BINS='/opt/core/bin/OnOffDSICommander /opt/car/bin/OnOffDSICommander'
+ONOFF_JACINTO=/net/hu-jacinto/opt/car/bin/OnOffDSICommander     # checked from hu-omap; run as: on -f <node> <program>
+ONOFF_JACINTO_NODE=hu-jacinto
+ONOFF_JACINTO_BIN=/opt/car/bin/OnOffDSICommander
 PROBE_HOST=/bin/cat                                   # runs libcpprobe.so as LD_PRELOAD: its constructor prints one line and exits
 # The file set depends on the HMI generation (KIND, set by hash/signature of HmiMain3D; see detect_kind / supported software):
 #   id5  the full plugin: menu, HMI patches, fullscreen, knob/touchpad, HUD route guidance.
 #   id6  turn-by-turn HUD only. On iDrive 6 the HMI does fullscreen, knob tilts and the touchpad itself (variant 0x9c71,
-#        coded on the car), so only the route-guidance hook (librghook in mm-ipod) is added. No menu plugin, no HMI patch,
-#        no reboot: mm-ipod is re-spawned per CarPlay session, so it takes effect on the next phone connection.
+#        coded on the car), so the route-guidance hook (librghook in mm-ipod) and the HUD-only menu are added, no HMI patch. The
+#        directions need no reboot (mm-ipod is re-spawned per CarPlay session: the next phone connection); the menu shows after a
+#        restart, on cars coded for apps.
 # KIND is the HMI generation (id5 / id6), found by the computer from HmiMain3D. MODE is what to install and is independent of it:
 #   full  the whole plugin (menu, HMI patches, fullscreen, knob/touchpad, HUD). On id6 the menu needs the car coded for apps and the
 #         HMI patches apply only to builds the plugin knows; the rest comes from the HMI itself (variant 0x9c71).
-#   hud   turn-by-turn HUD route guidance only (librghook in mm-ipod) -- no menu, no HMI patch, no reboot.
+#   hud   turn-by-turn route guidance (librghook in mm-ipod; from the next CarPlay connection, no reboot) and the HUD-only menu
+#         (after a restart, on cars coded for apps) -- no HMI patch.
 # The default follows the generation (id5 -> full, id6 -> hud); --full / --hud choose the other. Both work on both generations.
 KIND=id5
 MODE=
@@ -69,8 +79,8 @@ FILES_FULL="CarPlayMenu.manifest CarPlayMenu.xml CarPlayMenu_ALL_Texts.zip libCa
 LIBS_FULL="libCarPlayMenu.so $RGHOOKS libcppinch.so libcpreboot.so libcpprobe.so"
 # HUD-only: the route guidance, and the HUD-only menu (libCarPlayMenu-hud.so / CarPlayMenu-hud.xml, installed as libCarPlayMenu.so /
 # CarPlayMenu.xml; the HMI shows it where the car is coded for apps). The mm-ipod wrapper is built on the unit.
-FILES_HUD="$RGHOOKS libcpprobe.so boot.sh CarPlayMenu.manifest CarPlayMenu-hud.xml CarPlayMenu_ALL_Texts.zip libCarPlayMenu-hud.so"
-LIBS_HUD="$RGHOOKS libcpprobe.so libCarPlayMenu-hud.so"
+FILES_HUD="$RGHOOKS libcpprobe.so libcpreboot.so boot.sh CarPlayMenu.manifest CarPlayMenu-hud.xml CarPlayMenu_ALL_Texts.zip libCarPlayMenu-hud.so"
+LIBS_HUD="$RGHOOKS libcpprobe.so libcpreboot.so libCarPlayMenu-hud.so"     # libcpreboot.so: "restart" where there is no OnOffDSICommander
 FILES=$FILES_FULL
 LIBS=$LIBS_FULL
 apply_mode() {    # set FILES/LIBS from $MODE (default full)
@@ -352,8 +362,18 @@ make_dirs() {
 # restart (restart.sh).
 restart_unit() {
     REBOOT_LIB=
-    for f in "$PLUGIN/libcpreboot.so" "$BACKUP/plugin/libcpreboot.so"; do if [ -f "$f" ]; then REBOOT_LIB=$f; break; fi; done
-    if command -v OnOffDSICommander >/dev/null 2>&1; then how='OnOffDSICommander appreset'
+    # the installed plugin's, the last backup's, or the one the computer sent next to this script (a unit without the plugin)
+    for f in "$PLUGIN/libcpreboot.so" "$BACKUP/plugin/libcpreboot.so" "${0%/*}/libcpreboot.so"; do
+        if [ -f "$f" ]; then REBOOT_LIB=$f; break; fi
+    done
+    ONOFF=
+    if command -v OnOffDSICommander >/dev/null 2>&1; then ONOFF=OnOffDSICommander; fi
+    for f in $ONOFF_BINS; do if [ -z "$ONOFF" ] && [ -f "$f" ]; then ONOFF=$f; fi; done
+    ONOFF_ON=                                         # "on -f hu-jacinto": the tool runs on the node that has it
+    if [ -z "$ONOFF" ] && [ -f "$ONOFF_JACINTO" ] && command -v on >/dev/null 2>&1; then
+        ONOFF=$ONOFF_JACINTO_BIN; ONOFF_ON=$ONOFF_JACINTO_NODE
+    fi
+    if [ -n "$ONOFF" ]; then how="${ONOFF_ON:+on -f $ONOFF_ON }$ONOFF appreset"
     elif [ -n "$REBOOT_LIB" ]; then how="$REBOOT_LIB"
     else say 'Neither OnOffDSICommander nor libcpreboot.so is available. Reboot manually.'; exit 3; fi
     say "Restarting the head unit ($how). The SSH connection may close."
@@ -365,8 +385,13 @@ restart_unit() {
     if command -v sync >/dev/null 2>&1; then
         sync || { say 'Final sync failed. Restart skipped; reboot manually after inspection.'; exit 3; }
     fi
-    if [ "$how" = 'OnOffDSICommander appreset' ]; then
-        OnOffDSICommander appreset || { say 'The restart failed. Reboot manually.'; exit 3; }
+    if [ -n "$ONOFF" ]; then
+        if [ -n "$ONOFF_ON" ]; then on -f "$ONOFF_ON" "$ONOFF" appreset && return 0
+        elif "$ONOFF" appreset; then return 0; fi
+        [ -n "$REBOOT_LIB" ] || { say 'The restart failed. Reboot manually.'; exit 3; }
+        say "$ONOFF appreset failed; restarting with $REBOOT_LIB instead."
+        LD_PRELOAD=$REBOOT_LIB /bin/cat < /dev/null
+        say 'The reboot did not happen (libcpreboot.so returned). Reboot manually.'; exit 3
     else
         LD_PRELOAD=$REBOOT_LIB /bin/cat < /dev/null
         say 'The reboot did not happen (libcpreboot.so returned). Reboot manually.'; exit 3
@@ -379,7 +404,8 @@ CarPlay Advanced Settings installer 1.1.0 (NBT Evo iDrive 5 / iDrive 6)
 Usage: sh carplay-advanced.sh install|uninstall|status|restart [options]
   --host user@address   From a computer: the head unit to connect to (default root@169.254.199.99)
   --full                Install the full plugin (menu, HMI patches, fullscreen, knob/touchpad, HUD). Default on iDrive 5.
-  --hud                 Install turn-by-turn HUD route guidance only (no menu, no HMI patch, no reboot). Default on iDrive 6.
+  --hud                 Install turn-by-turn directions (from the next CarPlay connection, no reboot) and the HUD-only menu
+                        (after a restart, on cars coded for apps); no HMI patch. Default on iDrive 6.
   --payload <folder>    On the head unit: the folder with the plugin files (a computer uploads plugin/ itself)
   --hmi <software>      On the head unit: the supported iDrive 5 software the computer found by hash (full mode only)
   --kind id5|id6        On the head unit: the HMI generation the computer detected
@@ -594,6 +620,11 @@ ASKPASS
         omap "/bin/ksh -c 'cat > $2'" < "$1" || die "Upload of ${1##*/} failed."
         omap "/bin/cat $2" < /dev/null | cmp -s - "$1" || die "The uploaded ${1##*/} differs from $1."
     }
+    fetch_file() {    # fetch_file <file on hu-omap> <local file>: compared by size with the original
+        omap "/bin/cat $1" < /dev/null > "$2" || return 1
+        remote_size=$(omap "/bin/ksh -c 'wc -c < $1'" < /dev/null | tr -d ' \r') || return 1
+        [ "$(wc -c < "$2" | tr -d ' ')" = "$remote_size" ] || { say "Size of the copy of $1 differs."; return 1; }
+    }
     fetch_tree() {    # fetch_tree <folder on hu-omap> <local folder>: every file, compared by size with the original
         walk='walk() { for f in "$1"/*; do if [ -d "$f" ] && [ ! -L "$f" ]; then echo "D $f"; walk "$f"; elif [ -f "$f" ]; then echo "F $f"; fi; done; }; walk '
         listing=$(omap "/bin/ksh -c '$walk$1'" < /dev/null) || return 1
@@ -602,17 +633,44 @@ ASKPASS
             [ -n "$path" ] || continue
             local_path=$2/${path#"$1"/}
             if [ "$kind" = D ]; then mkdir -p "$local_path" || return 1; continue; fi
-            omap "/bin/cat $path" < /dev/null > "$local_path" || return 1
-            remote_size=$(omap "/bin/ksh -c 'wc -c < $path'" < /dev/null | tr -d ' \r') || return 1
-            [ "$(wc -c < "$local_path" | tr -d ' ')" = "$remote_size" ] || { say "Size of the copy of $path differs."; return 1; }
+            fetch_file "$path" "$local_path" || return 1
         done <<EOF
 $listing
 EOF
     }
+    # Before anything is sent: every head unit file this run may replace or link over, copied here (BACKUP/<time>-<action>-before).
+    # A file that is already one of the plugin's links is not copied (cat would read the plugin's copy): its original is in the
+    # switches folder (bin/) or the kept originals, which are copied whole. manifest.txt says what was found where.
+    pre_backup() {
+        PRE=$LOCAL_BACKUPS/$(date +%Y%m%d-%H%M%S)-$ACTION-before
+        mkdir -p "$PRE/system" || return 1
+        : > "$PRE/manifest.txt" || return 1
+        n_pre=0
+        for path in $START_SCREEN $MMIPOD $CONNECTIVITY $CARPLAY_INI $LAYOUT $LAYOUT_ID5 $LAYOUT_COMMON $LAYOUT_COMMON_ID5; do
+            state=$(omap "/bin/ksh -c 'if [ -L $path ]; then echo link; elif [ -f $path ]; then echo file; else echo absent; fi'" < /dev/null) || return 1
+            case "$state" in
+                file)
+                    mkdir -p "$PRE/system${path%/*}" || return 1
+                    fetch_file "$path" "$PRE/system$path" || return 1
+                    n_pre=$((n_pre + 1)); echo "file    $path -> system$path" >> "$PRE/manifest.txt" ;;
+                link) echo "link    $path (the plugin's link; its original is in the folders below)" >> "$PRE/manifest.txt" ;;
+                *) echo "absent  $path" >> "$PRE/manifest.txt" ;;
+            esac
+        done
+        for d in $PLUGIN $SETTINGS $BACKUPS/originals; do
+            if omap "/bin/ksh -c '[ -d $d ]'" < /dev/null; then
+                fetch_tree "$d" "$PRE/folders$d" || return 1
+                n_pre=$((n_pre + $(find "$PRE/folders$d" -type f | wc -l)))
+                echo "folder  $d -> folders$d" >> "$PRE/manifest.txt"
+            else
+                echo "absent  $d" >> "$PRE/manifest.txt"
+            fi
+        done
+    }
 
     # A reboot never answers: the head unit goes down with the connection open, and ssh would wait for its timeout. So the restart runs
     # in the background, its lines are shown as they come, and once the head unit says it reboots the installer stops waiting.
-    reboot_said() { grep 'rebooting the head unit' "$1" >/dev/null 2>&1 || grep 'Restarting the head unit (OnOffDSICommander' "$1" >/dev/null 2>&1; }
+    reboot_said() { grep 'rebooting the head unit' "$1" >/dev/null 2>&1 || grep 'Restarting the head unit (.*OnOffDSICommander' "$1" >/dev/null 2>&1; }
     remote_reboot() {    # remote_reboot <command on hu-omap> <stdin file>: 0 once the reboot is under way
         rb_out=$WORK/reboot.out; : > "$rb_out"
         omap "$1" < "$2" > "$rb_out" 2>&1 &
@@ -779,14 +837,15 @@ Installer: $VERSION"
             else
                 report_unsupported
                 say "The HMI scan did not find everything the plugin needs ($(cat "$WORK/scan.err" 2>/dev/null || :))."
-                say 'The full plugin needs a known build. You can still install the turn-by-turn HUD only with --hud (no HMI patch).'
+                say 'The full plugin needs a known build. You can still install the directions and the HUD-only menu with --hud (no HMI patch).'
                 if [ "$ACTION" = install ]; then say 'Nothing was installed.'; exit 1; fi
             fi
         elif [ "$MODE" = full ] && [ "$KIND" = id6 ]; then
             say 'Note: on iDrive 6 the menu appears only if the car is coded for apps (CarPlay fullscreen variant 0x9c71); the full'
             say "plugin's HMI patches apply only to builds it knows, so here it adds the menu and the HUD and leaves fullscreen/tilts/touchpad to the HMI."
         else
-            say 'Turn-by-turn HUD route guidance only: no menu, no HMI patch. It applies on the next CarPlay connection (no reboot).'
+            say 'Turn-by-turn directions and the HUD-only menu, no HMI patch. The directions apply on the next CarPlay connection (no'
+            say 'reboot); the HUD-only menu shows after a restart, where the car is coded for apps (A4A).'
         fi
     fi
 
@@ -803,6 +862,14 @@ Installer: $VERSION"
         printf '\n  Proceed with the installation? [Y/n] '
         answer=; read -r answer < /dev/tty || answer=n
         case "$answer" in ''|[Yy]*) ;; *) printf '\n'; say 'Nothing was installed.'; exit 1 ;; esac
+    fi
+
+    # -------- a copy here of what the run may change, before anything is sent
+    PRE=
+    if { [ "$ACTION" = install ] || [ "$ACTION" = uninstall ]; } && [ "$DRY_RUN" -eq 0 ]; then
+        step 'Copying the head unit files this run may change to this computer'
+        pre_backup || die "The copy to ${PRE:-$LOCAL_BACKUPS} failed; nothing was sent to the head unit or changed."
+        ok "Copied to BACKUP/${PRE##*/} ($n_pre files; manifest.txt lists them)."
     fi
 
     # -------- upload, run on hu-omap, fetch the backup
@@ -828,6 +895,8 @@ Installer: $VERSION"
         *) step "$ACTION on the head unit" ;;
     esac
     if [ "$ACTION" = restart ]; then
+        # libcpreboot.so goes along: a head unit without the plugin (or OnOffDSICommander) has nothing else to reboot with
+        if [ -f "$SRC/libcpreboot.so" ]; then send "$SRC/libcpreboot.so" "$STAGE/libcpreboot.so"; fi
         remote_reboot "/bin/sh $STAGE/carplay-advanced.sh restart" /dev/null || exit $?
         exit 0
     fi
@@ -874,16 +943,18 @@ Installer: $VERSION"
             row 'Removed' "the plugin, the boot hook and the plugin's path-manager links (the system files were never changed)"
             [ "$KEEP_CONFIG" -eq 1 ] && row 'Settings' "kept in $SETTINGS" || row 'Settings' 'moved to the backup'
         fi
+        [ -z "$PRE" ] || row 'Before' "BACKUP/${PRE##*/} (the files as they were, copied before the upload)"
         [ "$backup_ok" -eq 0 ] || row 'Backup' "BACKUP/${backup##*/} (and on the head unit: $backup)"
         [ "$backup_ok" -eq 0 ] || row 'Originals' 'BACKUP/originals (the system files the plugin shadows, kept once)'
         if [ "$ACTION" = install ] && [ "$SOFTWARE" = scanned ]; then
             printf '\n'
             report_scanned
         fi
-        if [ "$MODE" = hud ] && [ "$ACTION" = install ]; then
-            printf '\n  It applies on the next CarPlay connection: no restart needed.\n'
-        elif [ "$RESTART" -eq 0 ]; then
-            if [ "$ACTION" = install ]; then
+        if [ "$RESTART" -eq 0 ]; then
+            if [ "$ACTION" = install ] && [ "$MODE" = hud ]; then
+                printf '\n  The directions apply on the next CarPlay connection. %sA restart of the head unit is needed%s for the HUD-only\n' "$C_B" "$C_N"
+                printf '  menu (Media/Radio > CarPlay Advanced Settings, on cars coded for apps).\n'
+            elif [ "$ACTION" = install ]; then
                 printf '\n  %sA restart of the head unit is needed%s to load the plugin. Then: Media/Radio > CarPlay Advanced Settings.\n' "$C_B" "$C_N"
             else
                 printf '\n  %sA restart of the head unit is needed%s: the running HMI keeps the plugin until then.\n' "$C_B" "$C_N"
@@ -1019,7 +1090,7 @@ fi
 # ---------------------------------------------------------------------------------------------------------------- the cluster
 # Where CarPlay directions go: the KOMBI's route-guidance service over Ethernet (SOME/IP 0xB006 at 160.48.199.96:30502; G-series, J29)
 # or the MOST HUDTerminal (F-series), or both. One of four librghook builds goes in as librghook.so:
-#             full (the menu plugin draws on MOST)      HUD-only (no menu plugin)
+#             full (the menu plugin draws on MOST)      HUD-only (without the full plugin: mm-ipod draws)
 #   most      librghook.so (no network code)            librghook-most.so (draws on MOST from mm-ipod: the plugin's hud.h)
 #   kombi     librghook-kombi.so (sends to the KOMBI)   librghook-kombi.so
 #   both      librghook-kombi.so                        librghook-both.so
@@ -1281,7 +1352,7 @@ if [ "$ACTION" = install ]; then
         *)     say "  most: CarPlay directions on the MOST HUDTerminal ($RGHOOK)." ;;
     esac
     if [ "$MODE" = hud ] && [ "$CLUSTER_KIND" != kombi ]; then
-        say '  Drawn on MOST from mm-ipod (no menu plugin): not car-verified yet.'
+        say '  Drawn on MOST from mm-ipod (without the full plugin): not car-verified yet.'
     fi
     say "  Shown in the cluster, and in the HUD if one is fitted. Recorded in $SETTINGS/cluster."
 fi
@@ -1619,7 +1690,7 @@ fi
 if [ "$RESTART" -eq 1 ]; then
     restart_unit
 elif [ "$MODE" = hud ]; then
-    say 'Reconnect CarPlay to apply (no reboot needed), or run again with --restart-hmi to restart the head unit now.'
+    say 'Reconnect CarPlay for the directions (no reboot needed for them); restart the head unit for the HUD-only menu (--restart-hmi).'
 else
     say 'Restart the head unit to apply (or run again with --restart-hmi).'
 fi

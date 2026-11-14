@@ -466,6 +466,37 @@ class InstallTest(Base):
         self.assert_plugin()
         self.assertFalse(self.p['LOCK'].exists())
 
+    def test_restart_finds_onoff_outside_the_path(self):
+        # on the car the SSH shell's PATH has no /opt/core/bin: the installer looks there itself (ONOFF_BINS)
+        (self.bin / 'OnOffDSICommander').rename(self.root / 'OnOffDSICommander')
+        self.script.write_text(self.script.read_text().replace(
+            "ONOFF_BINS='/opt/core/bin/OnOffDSICommander /opt/car/bin/OnOffDSICommander'",
+            "ONOFF_BINS='/nonexistent/OnOffDSICommander %s'" % (self.root / 'OnOffDSICommander')))
+        out = self.run_script('restart')
+        self.assertIn('Restarting the head unit (%s appreset)' % (self.root / 'OnOffDSICommander'), out)
+        self.assertIn('appreset appreset', self.calls())
+
+    def test_restart_with_onoff_on_jacinto(self):
+        # HMI 1703: only hu-jacinto has it (/opt/car/bin); hu-omap runs it there with on -f hu-jacinto
+        (self.bin / 'OnOffDSICommander').unlink()
+        j = self.root / 'net/hu-jacinto/opt/car/bin/OnOffDSICommander'
+        j.parent.mkdir(parents=True)
+        j.write_text('#!/bin/sh\necho "jacinto appreset $*" >> "$TEST_CALLS"\n')
+        j.chmod(0o755)
+        self.script.write_text(self.script.read_text().replace('ONOFF_JACINTO=/net/hu-jacinto/', 'ONOFF_JACINTO=%s/net/hu-jacinto/' % self.root))
+        self.stub('on', 'echo "on $*" >> "$TEST_CALLS"\n'
+                  '[ "$1" = -f ] && [ "$2" = hu-jacinto ] || exit 90\nshift 2; prog=$1; shift\n'
+                  'exec "$TEST_ROOT/net/hu-jacinto$prog" "$@"')
+        out = self.run_script('restart')
+        self.assertIn('Restarting the head unit (on -f hu-jacinto /opt/car/bin/OnOffDSICommander appreset)', out)
+        self.assertIn('jacinto appreset appreset', self.calls())
+
+    def test_restart_falls_back_to_libcpreboot(self):
+        self.run_script('install')
+        out = self.run_script('restart', rc=3, TEST_HMI_RC=1)                         # appreset fails: libcpreboot.so next
+        self.assertIn('appreset failed; restarting with', out)
+        self.assertIn('reboot did not happen', out)
+
     def test_restart_action(self):
         self.assertIn('would be restarted', self.run_script('restart', '--dry-run'))
         self.assertNotIn('appreset', ' '.join(self.calls()))
@@ -679,6 +710,51 @@ class FromComputerTest(Base):
         self.assertLess(out.index('Backup copied'), out.index('Restarting the head unit'))
         self.assertTrue(any((self.root / 'BACKUP').glob('*-install/COMMITTED')))
 
+    def test_files_copied_here_before_the_upload(self):
+        out = self.computer('install')
+        self.assertLess(out.index('Copying the head unit files this run may change'), out.index('Uploading the plugin'))
+        (pre,) = (self.root / 'BACKUP').glob('*-install-before')
+        self.assertEqual((pre / ('system' + str(self.p['START_SCREEN']))).read_bytes(), START_SCREEN)   # as it was: no hook line
+        self.assertEqual((pre / ('system' + str(self.p['MMIPOD']))).read_bytes(), elf(b'mm-ipod', etype=2))
+        manifest = (pre / 'manifest.txt').read_text()
+        self.assertIn('absent  %s' % self.p['PLUGIN'], manifest)                       # first install
+        self.assertIn('Before', out)
+        # the next run copies the installed plugin first; the plugin's own links are named, not copied
+        self.computer('uninstall')
+        self.computer('install', '--hud')
+        out = self.computer('install')                                                 # (a second --hud on top of one stops at the link)
+        pre = sorted((self.root / 'BACKUP').glob('*-install-before'))[-1]
+        manifest = (pre / 'manifest.txt').read_text()
+        self.assertIn('folder  %s' % self.p['PLUGIN'], manifest)
+        self.assertIn('link    %s' % self.p['MMIPOD'], manifest)
+        self.assertTrue((pre / ('folders' + str(self.p['SETTINGS'])) / 'bin' / 'mm-ipod').is_file())   # its original
+
+    def test_failed_copy_stops_before_the_upload(self):
+        (self.root / 'BACKUP').write_text('not a folder')
+        out = self.computer('install', rc=1)
+        self.assertIn('nothing was sent to the head unit or changed', out)
+        self.assertFalse(self.p['STAGE'].exists())
+        self.assertFalse(self.p['PLUGIN'].exists())
+        self.assertEqual(self.hooked(), 0)
+
+    def test_dry_run_copies_nothing(self):
+        self.computer('install', '--dry-run')
+        self.assertFalse(list((self.root / 'BACKUP').glob('*-before')))
+
+    def test_restart_without_the_plugin_sends_libcpreboot(self):
+        (self.bin / 'OnOffDSICommander').unlink()                      # and no plugin installed: the computer sends libcpreboot.so
+        out = self.computer('restart', rc=3)                           # the host's cat ignores the preload: "did not happen"
+        self.assertNotIn('Neither OnOffDSICommander nor libcpreboot.so', out)
+        self.assertIn('libcpreboot.so', out)
+        self.assertIn('reboot did not happen', out)
+
+    def test_hud_install_offers_the_restart(self):
+        out = self.computer('install', '--hud')
+        self.assertIn('A restart of the head unit is needed', out)
+        self.assertIn('for the HUD-only', out)
+        self.assertIn('sh carplay-advanced.sh restart', out)                           # no terminal: how to restart later
+        self.assertTrue((self.p['PLUGIN'] / 'libcpreboot.so').is_file())               # "restart" works without OnOffDSICommander
+
     def test_restart_does_not_wait_for_the_dropped_connection(self):
         # a real reboot leaves the SSH session hanging until a timeout: the installer stops once the head unit says it restarts
         import time
@@ -715,7 +791,8 @@ class FromComputerTest(Base):
         self.assertIn('Root SSH access could not be verified', out)
         self.assertIn('reported a failure (exit 1)', out)
         self.assertFalse(self.p['STAGE'].exists())
-        self.assertFalse((self.root / 'BACKUP').exists())
+        # only the copy made before the upload; the head unit wrote no backup of its own
+        self.assertEqual([d.name.endswith('-install-before') for d in (self.root / 'BACKUP').iterdir()], [True])
 
     def test_missing_plugin_file(self):
         (self.pl / 'libcppinch.so').unlink()
@@ -915,7 +992,7 @@ class ClusterTest(Base):
     def test_hud_only_most(self):
         out = self.hud_only('kombi=0 refused or unreachable')
         self.assertIn('most: CarPlay directions on the MOST HUDTerminal (librghook-most.so)', out)
-        self.assertIn('Drawn on MOST from mm-ipod (no menu plugin)', out)
+        self.assertIn('Drawn on MOST from mm-ipod (without the full plugin)', out)
         self.assertEqual(self.rghook(), 'librghook-most.so')
         self.assertTrue((self.p['PLUGIN'] / 'libcpprobe.so').exists())
 

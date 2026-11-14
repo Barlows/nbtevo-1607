@@ -114,8 +114,13 @@ python3 -m unittest discover -s tests        # about 3 minutes; installer tests 
   stack) for every CarPlay session. `CONN_MOCCA` is Connectivity's launcher package: stopping it leaves its watchdog registration, and
   the unit resets about a minute later (`/var/dump/wd_err_omap_<pid>.log`, "WD ERROR ... Connectivity ... CODE 1"). Never stop it.
 - Rebooting: `starterPackageCtrl -d0 -s/-e HMI` only flips the package state (HmiMain3D keeps running); holding the volume knob does
-  nothing on the MINI; `OnOffDSICommander` is missing on HMI 1703; `/opt/sys/bin/sysshutdown` only unmounts. What works is
-  `sysmgr_reboot()` on hu-omap (`libcpreboot.so`). The SSH session to hu-jacinto may close a little later.
+  nothing on the MINI; `/opt/sys/bin/sysshutdown` only unmounts. `OnOffDSICommander appreset` (an application reset; its other
+  commands such as `boloreset`, `transport`, `flash`, `garage` switch to bootloader or persistent modes and are never used) is not on
+  the SSH shell's PATH: the 006 image has it in `/opt/core/bin` and `/opt/car/bin` on hu-omap; on the MINI F54 (HMI 1703) it is on
+  hu-jacinto only (`/opt/car/bin`, seen by the user 2026-11-14), so `restart_unit` runs it with `on -f hu-jacinto`. Then
+  `sysmgr_reboot()` on hu-omap (`libcpreboot.so`, which works: also the fallback when appreset fails). The computer's `restart`
+  sends `libcpreboot.so` along, and the HUD-only file set has it too, so a unit without the plugin can be restarted. The SSH session
+  to hu-jacinto may close a little later.
 - CarPlay's `carplay.ini`: the template `/opt/conn/data/carplay/carplay.ini` and **Connectivity's working copy
   `/var/opt/conn/carplay/carplay.ini`**, which is what CarPlay reads. Connectivity rewrites the working copy from the template only
   when coded values change. `[KnobInput]` / `[TouchPadInput]` / `[TouchScreen]` are read once when Connectivity starts, `[Screen]` per
@@ -559,8 +564,12 @@ display layer does).
      `/opt/hmi/bin/HmiMain3D`) and `libconn_carplay.so` over SSH and hashes them on the computer (the unit has no hash tool).
   4. Detects the generation (`KIND`): iDrive 6's `handleControllerInput` has, for keys 9..12, `isVariantSet(0x9c71); cmp r0,#0;
      movne <dir>,#1`.
-  5. Uploads itself and the files to `/fs/sda1/opt/carplay-advanced-upload` with `cat`, reading each back and comparing.
-  6. On a terminal, shows what it will install and asks "Proceed?" (`--yes` skips; a dry run or no terminal does not ask).
+  5. On a terminal, shows what it will install and asks "Proceed?" (`--yes` skips; a dry run or no terminal does not ask).
+  6. Before anything is sent (install and uninstall, not a dry run): copies every file the run may replace or link over to
+     `BACKUP/<time>-<action>-before/` (`pre_backup`: `system/<path>` for start_screen.sh, mm-ipod, Connectivity, carplay.ini and the
+     four layouts, the plugin's own links only named; `folders/<path>` for the plugin, the switches and the kept originals;
+     `manifest.txt`). A failed copy stops the run with nothing sent. Then uploads itself and the files to
+     `/fs/sda1/opt/carplay-advanced-upload` with `cat`, reading each back and comparing.
   7. Runs itself there with `--payload --kind --mode --hmi [--cluster]`, removes the upload, and copies the run's backup and the kept
      system originals to `BACKUP/` (with the head unit's full output as `installer-output.log`).
   8. Ends with a summary (what is installed or removed, where the backup is) and offers the restart.
