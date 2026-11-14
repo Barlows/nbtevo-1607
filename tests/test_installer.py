@@ -615,6 +615,32 @@ class FromComputerTest(Base):
         self.assertIn('Done: CarPlay Advanced Settings is installed', out)
         self.assertFalse((self.p['PLUGIN'] / 'build.tab').exists())
 
+    def test_mmipod_unknown_is_a_note(self):
+        mm = sha(elf(b'mm-ipod', etype=2))
+        out = self.computer('install')
+        self.assertIn('mm-ipod is not one we know (sha256 %s)' % mm, out)
+        self.assertIn('Done: CarPlay Advanced Settings is installed', out)
+
+    def test_mmipod_known(self):
+        mm = sha(elf(b'mm-ipod', etype=2))
+        s = self.script.read_text()
+        start = s.index("mmipod_table() {\n    cat <<'EOF'\n") + len("mmipod_table() {\n    cat <<'EOF'\n")
+        self.script.write_text(s[:start] + '%s  TEST_006 TEST_1703\n' % mm + s[start:])
+        self.assertIn('mm-ipod is a known one (TEST_006, TEST_1703)', self.computer('install', '--dry-run'))
+
+    def test_mmipod_hashed_from_the_kept_copy_when_linked(self):
+        mm = sha(elf(b'mm-ipod', etype=2))
+        self.computer('install', '--hud')
+        self.assertTrue(self.p['MMIPOD'].is_symlink())                                # now the wrapper
+        out = self.computer('status')
+        self.assertIn('mm-ipod is not one we know (sha256 %s)' % mm, out)              # the original, not the wrapper script
+
+    def test_unsupported_report_has_the_mmipod_hash(self):
+        self.p['HMI_VERSION_FILE'].write_bytes(b'NBTevo_ID5_1903_Release ID5_1903-999 Build 12')
+        self.p['HMI_BIN'].write_bytes(b'HmiMain3D other')
+        out = self.computer('install', rc=1)
+        self.assertIn('mm-ipod sha256: %s' % sha(elf(b'mm-ipod', etype=2)), self.issue_link(out)['body'][0].splitlines())
+
     def test_missing_library_is_unsupported(self):
         self.p['CONN_LIB'].unlink()
         out = self.computer('install', rc=1)

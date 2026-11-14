@@ -609,6 +609,10 @@ built and checked against the package's layouts only, **untested in a car** (nor
 
 - Support is decided by the SHA-256 of `HmiMain3D` and `libconn_carplay.so` (`supported_table` in the installer). The plugin itself
   picks addresses by build name (`kBuilds`, then `build.tab`) and checks every word.
+- **mm-ipod** (every mode, iDrive 5 and 6): hashed and looked up in `mmipod_table` (sha256 and the builds that have it; 006 and 1703
+  share `d3f7c897...`). With the directions installed `/opt/conn/bin/carplay/mm-ipod` is a link to the wrapper, so the kept original
+  (`carplaymenu/bin/mm-ipod`) is hashed. Unknown = a note only: librghook rewrites iAP2 messages in `read()`/`write()` and uses no
+  mm-ipod addresses. The hash is in both issue links.
 - **HMI scan** (`hmi_scan`, on the computer, `od` + `awk` only; ~20 s): the installer reads HmiMain3D once into its work folder, and
   for the full plugin on iDrive 5 it searches it with the `hmi_patterns` block. Each `find` is a window of instruction words around a
   place the plugin uses (`touch` = `handleTouchInput`, `tdfirst`/`tdend` its CTouchData loads, `ctl` / `play` the controller and track

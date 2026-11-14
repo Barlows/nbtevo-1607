@@ -133,6 +133,19 @@ EOF
         if [ "$match" -eq 1 ]; then echo "$name"; return 0; fi
     done
 }
+# mm-ipod (the iAP2 driver librghook is preloaded into for the turn-by-turn directions, in every install mode). librghook only
+# rewrites iAP2 messages in read()/write() on the transport (no addresses in mm-ipod), so another mm-ipod is no reason to stop; it is
+# reported as untested. sha256 and where it was seen:
+mmipod_table() {
+    cat <<'EOF'
+d3f7c8973feff37d512ba92baf42d40ce8a2626fe38fdf17e7da10db320bb36f  ID5_1703-490-1650ZD_Build_139 ID5_1803-510-1749MA_Build_71
+EOF
+}
+mmipod_known() {    # mmipod_known <sha256>: the builds that have this mm-ipod, or nothing
+    mmipod_table | while read -r m_sum m_where; do
+        if [ "$m_sum" = "$1" ]; then echo "$m_where"; fi
+    done
+}
 is_software_name() {
     supported_table | grep "^$1 " >/dev/null 2>&1
 }
@@ -662,6 +675,7 @@ EOF
         body="HMI build: ${hmi_version:-unknown}
 HmiMain3D sha256: $hash_hmi
 libconn_carplay.so sha256: $hash_conn
+mm-ipod sha256: $hash_mmipod
 scan sha256: $(scan_hash "$WORK/build.tab")
 Installer: $VERSION
 Result: (please tell us what works: menu, full screen, knob tilts, touchpad)
@@ -688,12 +702,14 @@ $(grep -v '^hmi ' "$WORK/build.tab")"
         say "  HMI build           ${hmi_version:-unknown}"
         say "  HmiMain3D           $hash_hmi"
         say "  libconn_carplay.so  $hash_conn"
+        say "  mm-ipod             $hash_mmipod"
         say 'The plugin patches HmiMain3D at fixed addresses, so every software needs its own entry.'
         say 'To ask for support, open an issue (the link fills in the lines above):'
         title="Support for HMI ${hmi_version:-unknown}"
         body="HMI build: ${hmi_version:-unknown}
 HmiMain3D sha256: $hash_hmi
 libconn_carplay.so sha256: $hash_conn
+mm-ipod sha256: $hash_mmipod
 Installer: $VERSION"
         say "  $ISSUES_URL?title=$(urlencode "$title")&body=$(urlencode "$body")"
     }
@@ -709,6 +725,18 @@ Installer: $VERSION"
         gen=$([ "$KIND" = id6 ] && echo 'iDrive 6' || echo 'iDrive 5')
         ok "Head unit: $gen, ${hmi_version:-unknown}"
         ok "Install mode: $MODE${MODE_REQ:+ (chosen)}${MODE_REQ:- (recommended for this HMI; --full / --hud to change)}"
+        # mm-ipod, in every mode: with the directions installed it is a link to the wrapper, so its kept original copy is hashed
+        mm_path=$MMIPOD
+        if omap "/bin/ksh -c '[ -L $MMIPOD ] && [ -f $MMIPOD_BIN ]'" < /dev/null; then mm_path=$MMIPOD_BIN; fi
+        hash_mmipod=$(remote_sha256 "$mm_path") || die "Cannot read $mm_path on hu-omap."
+        mm_known=$(mmipod_known "$hash_mmipod")
+        if [ "$hash_mmipod" = missing ]; then
+            note "No $MMIPOD on this head unit: the turn-by-turn directions need it."
+        elif [ -n "$mm_known" ]; then
+            ok "mm-ipod is a known one ($(echo $mm_known | sed 's/ /, /g'))."
+        else
+            note "mm-ipod is not one we know (sha256 $hash_mmipod). The directions hook reads the iPhone's iAP2 messages, not addresses in mm-ipod, so it should work, but it is untested on this one. Please report how it goes."
+        fi
         # The full plugin patches HmiMain3D at fixed addresses, so on iDrive 5 the build must be known (by hash). On iDrive 6 the plugin
         # does not patch (it is an unknown build to it; the native features come from the HMI), so no hash is needed. HUD never patches.
         if [ "$MODE" = full ] && [ "$KIND" = id5 ]; then

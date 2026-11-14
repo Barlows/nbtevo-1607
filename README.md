@@ -97,7 +97,8 @@ all of them, it says that this HMI is not supported yet and asks whether to inst
 build; the plugin still checks every word before it changes it, so a wrong address changes nothing). Either way it prints a link
 that opens a GitHub issue with the hashes and the addresses it found: that is all that is needed to add the build to the list. If
 the search does not find everything, it stops with nothing changed. The turn-by-turn-only install (`--hud`) patches no HMI code
-and does not need a known build.
+and does not need a known build. The installer also checks `mm-ipod` (the iPhone driver the directions hook into) by hash in every
+mode: an unknown one only gets a note, since the hook works on the iPhone's messages rather than on addresses in it.
 
 > **NBT-AAD.** This plugin has **not been tested together with [NBT-AAD](https://github.com/Sq00ky/Supra-iDrive6-Android-Auto)**
 > (Android Auto for the NBT Evo). Both are HMI plugins that use the same cluster channels (the MOST `HUDTerminal`, the KOMBI guidance
