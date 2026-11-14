@@ -179,8 +179,9 @@ boot.sh (from /bin/start_screen.sh): path-manager links for the layout, carplay.
   writes the file, makes or removes links, and logs `(applies after restart)` when it does not apply at once.
 - `menu_v2`: on its first start the current plugin converts the older flat menu's switches (a touchpad option on -> "Enable
   touchpad" and "Tap touchpad as click" on).
-- Build detection (`detectBuild`): the build name in `/opt/hmi/ID5/data/ro/version.txt` picks a `kBuilds` entry. No match = **menu
-  only**: nothing is written into the HMI. Log: `/dev/shmem/carplaymenu.log`.
+- Build detection (`detectBuild`): the build name in `/opt/hmi/ID5/data/ro/version.txt` picks a `kBuilds` entry. No match: the
+  installer's scan in the plugin folder (`build.tab`, `loadBuildTab`) when its `hmi` line is exactly the running version line; else
+  **menu only**: nothing is written into the HMI. Log: `/dev/shmem/carplaymenu.log` (`HMI build scanned (build.tab)`).
 
 ## HMI code patches and hooks
 
@@ -606,9 +607,28 @@ display layer does).
 Both builds on a **BMW** (common layout, 1440 / 1280 wide): the same HMI and Connectivity, so the same hashes and patches; full screen
 built and checked against the package's layouts only, **untested in a car** (nor in IDEmu with a BMW environment).
 
-- Support is decided by the SHA-256 of `HmiMain3D` and `libconn_carplay.so` (`supported_table` in the installer). On unknown software
-  nothing is installed, and the installer prints a pre-filled GitHub issue link (`ISSUES_URL`). The plugin itself picks addresses by
-  build name (`kBuilds`) and checks every word, so an unknown build gets the menu only.
+- Support is decided by the SHA-256 of `HmiMain3D` and `libconn_carplay.so` (`supported_table` in the installer). The plugin itself
+  picks addresses by build name (`kBuilds`, then `build.tab`) and checks every word.
+- **HMI scan** (`hmi_scan`, on the computer, `od` + `awk` only; ~20 s): the installer reads HmiMain3D once into its work folder, and
+  for the full plugin on iDrive 5 it searches it with the `hmi_patterns` block. Each `find` is a window of instruction words around a
+  place the plugin uses (`touch` = `handleTouchInput`, `tdfirst`/`tdend` its CTouchData loads, `ctl` / `play` the controller and track
+  send calls, `tA`/`tB`/`tC` the tilt patch, `f1`..`f7` the CARPLAY_FULLSCREEN reads), with branch targets, pc-relative loads,
+  MOVW/MOVT and the read offsets masked, and words that differ between the known builds masked completely; it must match exactly
+  once (`to:<word>:<anchor>`: that word must branch to the other anchor). The values are read from the words found: `bl` targets,
+  the two `add` immediates of each proxy, the `ldr` imm12 offsets (`tdTime` = `tdOrigin` - 4), the patch words by `patch` lines
+  (`=`, `imm24` keeps the found branch offset, `b:tB+0x40` a branch to that place). Tilt and fullscreen are all or nothing; no
+  fullscreen code = 1703-like layout (`pbw 2`).
+  - Known build: the scan must give exactly the built-in values (`scan` rows of `supported_table`: SHA-256 of the output without its
+    `hmi` line and comments); a mismatch is a note, and the built-in table is used.
+  - Unknown build, scan complete: "not supported yet ... install with the scanned addresses? [y/N]" (`--yes` = yes; no terminal and
+    no `--yes` = nothing installed), `--hmi scanned` and `build.tab` uploaded with the plugin; the head unit refuses it unless its
+    `hmi` line is this HMI's version line. A pre-filled issue (`Scanned HMI ...`) carries the hashes, the scan hash and build.tab.
+  - Scan incomplete: as before, nothing installed, issue link with the hashes and what was not found.
+  - `tools/hmipatterns.py <006 HmiMain3D> <1703 HmiMain3D> [--check <other>...] [--write]` makes the block from the two known builds
+    (each window grows until it is unique in both, at least 8 unmasked words, lookup key = its rarest word); `--expect <build>`
+    prints the scan a known build must give. Run it again (with `--write`) after a change of the patterns or a new known build.
+  - Checked in IDEmu (mini-f54-1703, 2026-11-14): with the built-in 1703 entry renamed, the plugin loaded `build.tab` from the scan
+    of the real 1703 HmiMain3D and wrote the 19 tilt words and both hooks (every word matched its expected original).
 - Adding a software: the hashes (from `status` on that unit, from the exact files of a car or package, never a modified copy), a
   `kBuilds` entry, the tilt words (`src/tilt_*.json`, mapped by matching functions with a known build), then its lines in
   `supported_table`. Between 006 and 1703, `libAppFramework`/`libCoreFramework` differ in 2-3 bytes, while `mm-ipod`,
@@ -636,7 +656,7 @@ built and checked against the package's layouts only, **untested in a car** (nor
 
 | Test | Covers |
 |---|---|
-| `test_installer.py` | the installer under `sh` and `ksh` in a fake file tree: computer and head-unit halves, checks, backups, rollback, hooks, the HUD-only wrapper, the cluster choice and variants |
+| `test_installer.py` | the installer under `sh` and `ksh` in a fake file tree: computer and head-unit halves, checks, backups, rollback, hooks, the HUD-only wrapper, the cluster choice and variants; the HMI scan on made-up HmiMain3D files built from its own patterns (`synth_hmi`), the scanned install; with `CPA_HMI_006` / `CPA_HMI_1703` (the plain HmiMain3D of both builds) the scan of the real builds against `--expect` and the `scan` rows |
 | `test_carplay_bootguard.py` | the real `boot.sh` guard: strikes, safe mode, disable, Restart to apply, a run while the HMI is up |
 | `test_hud_shapes.py` | every maneuver picture: convex pieces inside the box, roundabout details, mirroring, lanes; with `MAPBOX_STYLEKIT` set, that `hudglyphs.h` is what the generator makes |
 | `test_rghook_lanes.py` | `rghook.c` lane decoding into the routeguidance file |

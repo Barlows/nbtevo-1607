@@ -364,8 +364,107 @@ bool contains(const char *s, const char *w) {
   }
   return false;
 }
+// build.tab: the installer's scan of an HMI build that is not in kBuilds (hmi_scan in carplay-advanced.sh, from HmiMain3D itself).
+// It is used only when its first line ("hmi <version line>") is the running HMI's version line; every word is still compared with
+// its expected original before it is written (patchWords), so a wrong scan changes nothing. Lines: "<name> <hex>" for the Build
+// values, "tilt|fs <addr> <orig> <new>" for the patch words, "#" comments.
+const char *const kBuildTab = "/var/opt/hmi/data/rw/Plugins/CarPlayMenu/build.tab";
+Build g_tab;
+Word g_tabTilt[40], g_tabFs[16];
+char g_tabText[4096];
+
+const char *hexWord(const char *p, u32 *out) {
+  while (*p == ' ')
+    p++;
+  u32 n = 0;
+  int k = 0;
+  for (;; p++, k++) {
+    int d = *p >= '0' && *p <= '9' ? *p - '0' : *p >= 'a' && *p <= 'f' ? *p - 'a' + 10 : -1;
+    if (d < 0)
+      break;
+    n = n * 16 + (u32)d;
+  }
+  *out = n;
+  return k ? p : 0;
+}
+u32 strLen(const char *s) {
+  u32 n = 0;
+  while (s[n])
+    n++;
+  return n;
+}
+bool startsWith(const char *s, const char *w) {
+  while (*w)
+    if (*s++ != *w++)
+      return false;
+  return true;
+}
+bool loadBuildTab(const char *version) {
+  int fd = open(kBuildTab, 0);
+  if (fd < 0)
+    return false;
+  long n = read(fd, g_tabText, sizeof g_tabText - 1);
+  close(fd);
+  if (n <= 0)
+    return false;
+  g_tabText[n] = 0;
+  static const char *const kNames[] = { "touchFn",  "ctlSetFn", "ctlProxy", "playFn", "playObj", "tdFirst",
+                                        "tdEnd",    "tdTime",   "tdOrigin", "pbw",    "pbwBmw",  "ini" };
+  u32 *const fields[] = { &g_tab.touchFn, &g_tab.ctlSetFn, &g_tab.ctlProxy, &g_tab.playFn, &g_tab.playObj, &g_tab.tdFirst,
+                          &g_tab.tdEnd,   &g_tab.tdTime,   &g_tab.tdOrigin, &g_tab.pbw,    &g_tab.pbwBmw,  &g_tab.ini };
+  u32 seen = 0, nt = 0, nf = 0;
+  bool hmiOk = false, bad = false;
+  for (char *l = g_tabText; *l && !bad;) {
+    char *e = l;
+    while (*e && *e != '\n')
+      e++;
+    char *next = *e ? e + 1 : e;
+    *e = 0;
+    if (startsWith(l, "hmi ")) {
+      const char *a = l + 4, *b = version;
+      while (*a && *a == *b)
+        a++, b++;
+      hmiOk = !*a && !*b;
+    } else if (startsWith(l, "tilt ") || startsWith(l, "fs ")) {
+      bool tilt = l[0] == 't';
+      Word w;
+      const char *p = hexWord(l + (tilt ? 5 : 3), &w.addr);
+      p = p ? hexWord(p, &w.orig) : 0;
+      p = p ? hexWord(p, &w.neu) : 0;
+      if (!p || (tilt ? nt >= sizeof g_tabTilt / sizeof g_tabTilt[0] : nf >= sizeof g_tabFs / sizeof g_tabFs[0]))
+        bad = true;
+      else if (tilt)
+        g_tabTilt[nt++] = w;
+      else
+        g_tabFs[nf++] = w;
+    } else if (*l && *l != '#') {
+      u32 i = 0;
+      while (i < sizeof kNames / sizeof kNames[0] && !(startsWith(l, kNames[i]) && l[strLen(kNames[i])] == ' '))
+        i++;
+      if (i == sizeof kNames / sizeof kNames[0] || !hexWord(l + strLen(kNames[i]), fields[i]))
+        bad = true;
+      else
+        seen |= 1u << i;
+    }
+    l = next;
+  }
+  char b[240];
+  if (bad || !hmiOk || seen != (1u << (sizeof kNames / sizeof kNames[0])) - 1) {
+    snprintf(b, sizeof b, "CarPlayMenu: build.tab not used (%s)", bad ? "unreadable line" : !hmiOk ? "for another HMI build" : "values missing");
+    logLine(b);
+    return false;
+  }
+  g_tab.id = version;
+  g_tab.tag = "scanned (build.tab)";
+  g_tab.tilt = nt ? g_tabTilt : 0;
+  g_tab.tiltN = nt;
+  g_tab.fs = nf ? g_tabFs : 0;
+  g_tab.fsN = nf;
+  return true;
+}
+
 void detectBuild() {
-  char v[160];
+  static char v[160];   // g_tab.id points here when build.tab is used
   int fd = open(kVersion, 0);
   long n = fd >= 0 ? read(fd, v, sizeof v - 1) : -1;
   if (fd >= 0)
@@ -382,6 +481,8 @@ void detectBuild() {
   for (u32 i = 0; i < sizeof kBuilds / sizeof kBuilds[0]; i++)
     if (contains(v, kBuilds[i].id))
       g_build = &kBuilds[i];
+  if (!g_build && loadBuildTab(v))
+    g_build = &g_tab;
   char b[240];
   if (g_build)
     snprintf(b, sizeof b, "CarPlayMenu: HMI build %s (%s)", g_build->tag, v);

@@ -92,9 +92,12 @@ hashes:
 | 006_017_006 | ID5_1803-510-1749MA Build 71 | not tried in a car yet |
 
 Before it changes anything, the installer reads the head unit's HMI and CarPlay library and compares their hashes with the list
-above. Only a match proceeds. On any other software it stops there, with nothing changed, and prints a link that opens a GitHub
-issue with the hashes it found: that is all that is needed to add a build. The turn-by-turn-only install (`--hud`) patches no HMI
-code and does not need a known build.
+above. On other iDrive 5 software it **searches the HMI for the places the plugin uses** (about 20 s on your computer). If it finds
+all of them, it says that this HMI is not supported yet and asks whether to install with the addresses it found (untested on that
+build; the plugin still checks every word before it changes it, so a wrong address changes nothing). Either way it prints a link
+that opens a GitHub issue with the hashes and the addresses it found: that is all that is needed to add the build to the list. If
+the search does not find everything, it stops with nothing changed. The turn-by-turn-only install (`--hud`) patches no HMI code
+and does not need a known build.
 
 > **NBT-AAD.** This plugin has **not been tested together with [NBT-AAD](https://github.com/Sq00ky/Supra-iDrive6-Android-Auto)**
 > (Android Auto for the NBT Evo). Both are HMI plugins that use the same cluster channels (the MOST `HUDTerminal`, the KOMBI guidance
@@ -123,8 +126,8 @@ sh carplay-advanced.sh install
 It then:
 
 1. checks the plugin files, and that the head unit answers;
-2. reads the HMI; for the full plugin on iDrive 5 it identifies the software by hash (an unknown build stops here, with nothing
-   changed);
+2. reads the HMI; for the full plugin on iDrive 5 it identifies the software by hash and searches it for the places the plugin uses
+   (an unknown build where the search finds everything asks first; otherwise it stops here, with nothing changed);
 3. asks **Proceed?**, uploads the plugin and backs up every file it will replace (on the head unit, and a copy in `BACKUP/` on your
    computer);
 4. installs, prints a summary of what is on the head unit now, and offers to **restart** it.
