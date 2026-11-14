@@ -251,6 +251,25 @@ class InstallTest(Base):
         self.assertEqual(self.hooked(), 1)
         self.assertTrue(self.p['MMIPOD'].is_symlink())
 
+    def test_install_hud_through_a_linked_rw(self):
+        # iDrive 5 (HMI 1803): /var/opt/hmi/data/rw is a link to the disk folder, and a first install has no Plugins/ there. QNX
+        # mkdir -p fails with "File exists" when its last path is a link to an existing folder (checked in IDEmu); the stand-in does so.
+        rw = self.p['SETTINGS'].parent
+        disk = rw.parent / 'ID5'
+        rw.rename(disk)
+        shutil.rmtree(disk / 'Plugins')
+        rw.symlink_to(disk)
+        self.stub('mkdir', 'if [ "$1" = -p ]; then for a; do last=$a; done\n'
+                  '  if [ -L "$last" ]; then echo "mkdir: $last: File exists" >&2; exit 1; fi\n'
+                  'fi\nexec /bin/mkdir "$@"')
+        out = self.run_script('install', '--kind', 'id5', '--mode', 'hud')
+        self.assertIn('SUCCESS: install completed', out)
+        self.assertNotIn('File exists', out)
+        self.assertTrue(rw.is_symlink())
+        self.assertTrue((disk / 'Plugins/CarPlayMenu/librghook.so').exists())
+        self.assertTrue((disk / 'carplaymenu/mm-ipod').exists())
+        self.assertTrue(self.p['MMIPOD'].is_symlink())
+
     def test_full_stack_on_id6_needs_no_hash(self):
         # the full plugin can still be forced on iDrive 6 (the plugin self-detects; no hash is required there).
         out = self.run_script('install', '--kind', 'id6', '--mode', 'full', '--hmi', '')

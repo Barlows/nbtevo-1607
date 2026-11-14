@@ -25,7 +25,7 @@ LC_ALL=C
 export LC_ALL
 umask 022
 
-VERSION=1.0.0
+VERSION=1.0.1
 REMOTE_NODE=/net/hu-omap
 STAGE=/fs/sda1/opt/carplay-advanced-upload            # upload folder on hu-omap (runs from a computer), removed afterwards
 SSH_HOST=root@169.254.199.99                          # the head unit over ENET (sshd on hu-jacinto)
@@ -155,6 +155,23 @@ say() {
 }
 die() { say "ERROR: $*" >&2; exit 1; }
 exists() { [ -e "$1" ] || [ -L "$1" ]; }
+# mkdir -p that follows links. QNX mkdir -p fails with "File exists" when the path it is given is a link to an existing folder, and on
+# iDrive 5 /var/opt/hmi/data/rw is such a link (to /fs/sda1/opt/hmi/data/ID5). Each part is made only when [ -d ] (which follows
+# links) says it is not there.
+make_dirs() {
+    md_path=
+    md_rest=${1#/}
+    while [ -n "$md_rest" ]; do
+        case "$md_rest" in
+            */*) md_part=${md_rest%%/*}; md_rest=${md_rest#*/} ;;
+            *) md_part=$md_rest; md_rest= ;;
+        esac
+        if [ -z "$md_part" ]; then continue; fi
+        md_path=$md_path/$md_part
+        if [ ! -d "$md_path" ]; then mkdir "$md_path" || return 1; fi
+    done
+    return 0
+}
 
 # Reboots hu-omap (exit 3 when it cannot). HMI ID5_1703-490 has no OnOffDSICommander (and the MINI ignores holding the volume knob):
 # then the plugin's libcpreboot.so (sync + sysmgr_reboot, run as LD_PRELOAD of /bin/cat) does it. Stopping launcher packages is no
@@ -184,7 +201,7 @@ restart_unit() {
 
 usage() {
     cat <<'EOF'
-CarPlay Advanced Settings installer 1.0.0 (NBT Evo iDrive 5 / iDrive 6)
+CarPlay Advanced Settings installer 1.0.1 (NBT Evo iDrive 5 / iDrive 6)
 Usage: sh carplay-advanced.sh install|uninstall|status|restart [options]
   --host user@address   From a computer: the head unit to connect to (default root@169.254.199.99)
   --full                Install the full plugin (menu, HMI patches, fullscreen, knob/touchpad, HUD). Default on iDrive 5.
@@ -1275,12 +1292,12 @@ fi
 ACTIVE=1
 if exists "$PLUGIN"; then mv "$PLUGIN" "$BACKUP/plugin"; fi
 if [ "$ACTION" = install ]; then
-    mkdir -p "${PLUGIN%/*}"
+    make_dirs "${PLUGIN%/*}"
     mv "$BACKUP/staged-plugin" "$PLUGIN"
     # id6: put the staged route-guidance wrapper in place ($SETTINGS). Any earlier $SETTINGS is moved to the backup (rollback restores it).
     if [ "$MODE" = hud ]; then
         if exists "$SETTINGS"; then mv "$SETTINGS" "$BACKUP/settings"; fi
-        mkdir -p "${SETTINGS%/*}"
+        make_dirs "${SETTINGS%/*}"
         mv "$BACKUP/staged-settings" "$SETTINGS"
     fi
 elif [ "$KEEP_CONFIG" -eq 0 ] && exists "$SETTINGS"; then
@@ -1310,7 +1327,7 @@ ACTIVE=0
 if [ "$ACTION" = install ]; then
     relink
     say 'Links for the switched-on options made with the new boot.sh.'
-    { mkdir -p "$SETTINGS" && echo "$CLUSTER_KIND" > "$SETTINGS/cluster"; } \
+    { make_dirs "$SETTINGS" && echo "$CLUSTER_KIND" > "$SETTINGS/cluster"; } \
         || say "Note: $SETTINGS/cluster not written: the menu plugin draws on MOST (as with most)."
 
 fi
