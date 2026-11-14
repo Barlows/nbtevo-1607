@@ -57,6 +57,7 @@ LOCK=/var/opt/carplay-advanced.lock
 ONOFF_BINS='/opt/core/bin/OnOffDSICommander /opt/car/bin/OnOffDSICommander'
 ONOFF_JACINTO=/net/hu-jacinto/opt/car/bin/OnOffDSICommander     # checked from hu-omap; run as: on -f <node> <program>
 ONOFF_JACINTO_NODE=hu-jacinto
+RESTART_WAIT=20                                       # seconds an appreset gets before libcpreboot.so restarts the unit instead
 ONOFF_JACINTO_BIN=/opt/car/bin/OnOffDSICommander
 PROBE_HOST=/bin/cat                                   # runs libcpprobe.so as LD_PRELOAD: its constructor prints one line and exits
 # The file set depends on the HMI generation (KIND, set by hash/signature of HmiMain3D; see detect_kind / supported software):
@@ -386,10 +387,16 @@ restart_unit() {
         sync || { say 'Final sync failed. Restart skipped; reboot manually after inspection.'; exit 3; }
     fi
     if [ -n "$ONOFF" ]; then
-        if [ -n "$ONOFF_ON" ]; then on -f "$ONOFF_ON" "$ONOFF" appreset && return 0
-        elif "$ONOFF" appreset; then return 0; fi
-        [ -n "$REBOOT_LIB" ] || { say 'The restart failed. Reboot manually.'; exit 3; }
-        say "$ONOFF appreset failed; restarting with $REBOOT_LIB instead."
+        onoff_rc=0
+        if [ -n "$ONOFF_ON" ]; then on -f "$ONOFF_ON" "$ONOFF" appreset || onoff_rc=$?
+        else "$ONOFF" appreset || onoff_rc=$?; fi
+        # appreset can return 0 and still not reset the unit: still running after RESTART_WAIT seconds = it did not happen
+        if [ "$onoff_rc" -eq 0 ]; then
+            [ "$RESTART_WAIT" -gt 0 ] || return 0              # 0: trust a successful appreset (the tests)
+            sleep "$RESTART_WAIT"
+        fi
+        [ -n "$REBOOT_LIB" ] || { say 'The restart did not happen. Reboot manually.'; exit 3; }
+        say "$ONOFF appreset did not restart the head unit; restarting with $REBOOT_LIB instead."
         LD_PRELOAD=$REBOOT_LIB /bin/cat < /dev/null
         say 'The reboot did not happen (libcpreboot.so returned). Reboot manually.'; exit 3
     else

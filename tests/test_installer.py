@@ -89,6 +89,8 @@ class Base(object):
             lines[matches[0]] = key + '=' + shlex.quote(str(value))
         (pw,) = [n for n, line in enumerate(lines) if line.startswith('SSH_PASSWORD=')]
         lines[pw] = "SSH_PASSWORD='pw & for tests'"
+        (rw,) = [n for n, line in enumerate(lines) if line.startswith('RESTART_WAIT=')]
+        lines[rw] = 'RESTART_WAIT=0'                                     # the stand-in appreset "restarts" at once
         start = lines.index('supported_table() {') + 2                   # after "cat <<'EOF'"
         end = lines.index('EOF', start)
         lines[start:end] = TABLE
@@ -494,8 +496,12 @@ class InstallTest(Base):
     def test_restart_falls_back_to_libcpreboot(self):
         self.run_script('install')
         out = self.run_script('restart', rc=3, TEST_HMI_RC=1)                         # appreset fails: libcpreboot.so next
-        self.assertIn('appreset failed; restarting with', out)
+        self.assertIn('appreset did not restart the head unit; restarting with', out)
         self.assertIn('reboot did not happen', out)
+        # appreset returns 0 but the unit is still up after RESTART_WAIT: libcpreboot.so too
+        self.script.write_text(self.script.read_text().replace('RESTART_WAIT=0', 'RESTART_WAIT=1'))
+        out = self.run_script('restart', rc=3)
+        self.assertIn('appreset did not restart the head unit; restarting with', out)
 
     def test_restart_action(self):
         self.assertIn('would be restarted', self.run_script('restart', '--dry-run'))
