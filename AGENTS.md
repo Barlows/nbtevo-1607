@@ -410,6 +410,12 @@ double buffers. The HUD shows what the cluster's guidance shows. `hud.h` does th
     `HUDTerminal.GetInstanceId(name)` returns the handle: 201 or 202 (its proxy records: 200 CreateInstance in the run at
     0xca26f4; 201/202 only elsewhere, at 0x2d7xxx). It also has a separate HUD terminal connection, used only with
     `FPK_PLUS_HUD` coded (display selection FPK / HUD / FPK+HUD): a windscreen HUD is probably its own HUDTerminal 82/02.
+  - **`hud-probe` action** (installer; from a computer it runs like `status` and saves the output as `BACKUP/hud-probe-<time>.txt`):
+    on the unit (`hud_probe`) the plugin's HUD state, switches and start-up HUD lines (MOST client, registry 82/xx, layout); then
+    "HUD debug log" on for the run (off and on again if it was on: the name probes go out), `ImageGetSize` 0x01..0x40 in both
+    forms through the test channel, and the answers parsed from the plugin log (surfaces with a size, 201/202 answers, errors).
+    `hud_debug` is put back as it was; `HUD_PROBE_WAIT` (8 s) per step. Needs the plugin with its HUD running (HUD-only: during
+    a CarPlay connection).
   - **Name probes** (`probeNames`, only when "HUD debug log" is switched on): 201 and 202 with `[0000][01][name][00]` for five names,
     to 82/00 and, if the registry has it, 82/02; the answers are logged, nothing is decided from them yet. The leading 0000 keeps it
     harmless if one of the numbers is ReleaseInstance.

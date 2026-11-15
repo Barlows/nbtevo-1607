@@ -58,6 +58,7 @@ ONOFF_BINS='/opt/core/bin/OnOffDSICommander /opt/car/bin/OnOffDSICommander'
 ONOFF_JACINTO=/net/hu-jacinto/opt/car/bin/OnOffDSICommander     # checked from hu-omap; run as: on -f <node> <program>
 ONOFF_JACINTO_NODE=hu-jacinto
 REBOOT_CONFIRM_S=75                                   # the computer waits this long for "restarting" (appreset + RESTART_WAIT + libcpreboot)
+HUD_PROBE_WAIT=8                                      # hud-probe: seconds for the plugin's HUD to take a batch and answer
 RESTART_WAIT=20                                       # seconds an appreset gets before libcpreboot.so restarts the unit instead
 ONOFF_JACINTO_BIN=/opt/car/bin/OnOffDSICommander
 PROBE_HOST=/bin/cat                                   # runs libcpprobe.so as LD_PRELOAD: its constructor prints one line and exits
@@ -409,7 +410,10 @@ restart_unit() {
 usage() {
     cat <<'EOF'
 CarPlay Advanced Settings installer 1.1.1 (NBT Evo iDrive 5 / iDrive 6)
-Usage: sh carplay-advanced.sh install|uninstall|status|restart [options]
+Usage: sh carplay-advanced.sh install|uninstall|status|restart|hud-probe [options]
+  hud-probe             Ask the cluster / HUD what it has (about 40 s, nothing installed or changed): the plugin's HUD state,
+                        the HUDTerminal instances, the surfaces and their sizes, the navigation's instance names. Needs the
+                        plugin with "CarPlay directions in HUD" on; from a computer the output is also saved in BACKUP/.
   --host user@address   From a computer: the head unit to connect to (default root@169.254.199.99)
   --full                Install the full plugin (menu, HMI patches, fullscreen, knob/touchpad, HUD). Default on iDrive 5.
   --hud                 Install turn-by-turn directions (from the next CarPlay connection, no reboot) and the HUD-only menu
@@ -442,7 +446,7 @@ EOF
 parse_args() {
  while [ "$#" -gt 0 ]; do
     case "$1" in
-        install|uninstall|status|restart)
+        install|uninstall|status|restart|hud-probe)
             [ -z "$ACTION" ] || die 'Specify exactly one action.'
             ACTION=$1 ;;
         --host)
@@ -909,6 +913,7 @@ Installer: $VERSION"
         uninstall) step 'Uninstalling on the head unit' ;;
         status) step 'State on the head unit' ;;
         restart) step 'Restarting the head unit' ;;
+        hud-probe) step 'Asking the cluster and the HUD (about 40 s)' ;;
         *) step "$ACTION on the head unit" ;;
     esac
     if [ "$ACTION" = restart ]; then
@@ -919,6 +924,13 @@ Installer: $VERSION"
         | tee "$WORK/out" | show_remote
     read -r rc < "$WORK/rc" || rc=1
     omap "/bin/ksh -c 'rm -rf $STAGE'" < /dev/null > /dev/null 2>&1 || say "Note: $STAGE is left on hu-omap (removed by the next run)."
+    if [ "$ACTION" = hud-probe ]; then
+        out=$LOCAL_BACKUPS/hud-probe-$(date +%Y%m%d-%H%M%S).txt
+        if mkdir -p "$LOCAL_BACKUPS" && cp "$WORK/out" "$out"; then
+            ok "Saved: BACKUP/${out##*/} (attach it to your issue; it holds no VIN or passwords)."
+        fi
+        exit "$rc"
+    fi
 
     done_line=$(grep '^SUCCESS: .* completed\. Previous files: ' "$WORK/out" || :)
     backup_ok=0
@@ -1095,6 +1107,91 @@ link_state() {
     elif [ -f "$1" ]; then echo 'original'
     else echo 'absent'; fi
 }
+
+# ---------------------------------------------------------------------------------------------------------------- hud-probe
+# What the cluster and the HUD have, asked through the plugin (only it has a MOST client): its test channel (one HUDTerminal call per
+# line, hud.h runCmds) and "HUD debug log" (hud_debug: the plugin logs every HUDTerminal message and sends its GetInstanceId name
+# probes to 82/00 and 82/02). Nothing is installed; hud_debug is put back as it was. The answers are read from the plugin log.
+hud_probe() {
+    HP_LOG=$SHMEM/carplaymenu.log
+    HP_CMD=$SHMEM/carplaymenu-hudcmd
+    HP_DBG=$SETTINGS/hud_debug
+    say "CarPlay Advanced Settings installer $VERSION; hud-probe"
+    say "HMI: ${hmi_build:-unknown}"
+    say "Plugin: $(if [ -d "$PLUGIN" ]; then echo "installed$([ -f "$PLUGIN/hud_only" ] && echo ' (HUD-only menu: the drawing runs in mm-ipod, during a CarPlay connection)')"; else echo 'not installed'; fi)"
+    for f in hud_guidance hud_debug hud_layout cluster; do
+        if [ -f "$SETTINGS/$f" ]; then say "  switch $f: on$(v=; read -r v < "$SETTINGS/$f" 2>/dev/null; [ -n "$v" ] && echo " ($v)")"; else say "  switch $f: off"; fi
+    done
+    say "HmiMain3D PID(s): $(one_line "$(pids_of HmiMain3D)")"
+    say "mm-ipod PID(s): $(one_line "$(pids_of mm-ipod)")"
+    [ -d "$PLUGIN" ] && [ -d "$SETTINGS" ] || { say 'Nothing to ask: install the plugin (with "CarPlay directions in HUD" on) first.'; return 1; }
+    [ -f "$HP_LOG" ] || { say "No plugin log ($HP_LOG): the plugin has not started since the last boot."; return 1; }
+    say '--- what the plugin found at its start (MOST client, registry, layout) ---'
+    grep -e 'HUD: MOST' -e 'HUD: registry' -e 'HUDTerminal 82' -e 'HUD: layout probe' -e 'HUD: cluster layout' -e 'HUD: picture box' \
+        -e 'HUD: other client' "$HP_LOG" | sed -n 1,30p
+    [ ! -f "$HP_CMD" ] || { say "The test channel is busy ($HP_CMD); try again in a minute."; return 1; }
+    hp_start=$(count_lines "$HP_LOG")
+    # 1. name probes: "HUD debug log" switched on (off and on again if it was on) makes the plugin send them, to 82/00 and 82/02
+    HP_WAS=0
+    [ -f "$HP_DBG" ] && HP_WAS=1
+    if [ "$HP_WAS" -eq 1 ]; then rm -f "$HP_DBG"; sleep "$HUD_PROBE_WAIT"; fi
+    echo 1 > "$HP_DBG" || { say "Cannot write $HP_DBG."; return 1; }
+    sleep "$HUD_PROBE_WAIT"
+    # 2. the surfaces: ImageGetSize (C04, it only reads) for 0x01..0x40, the F54 form [h] and the 6WB form [h][01]
+    hp_batch=
+    hp_i=1
+    while [ "$hp_i" -le 64 ]; do
+        hp_h=$(hex2 "$hp_i")
+        hp_batch="${hp_batch}c04 00$hp_h
+c04 00${hp_h}01
+"
+        hp_i=$((hp_i + 1))
+    done
+    echo "$hp_batch" > "$HP_CMD.tmp" && mv "$HP_CMD.tmp" "$HP_CMD"
+    hp_t=0
+    while [ -f "$HP_CMD" ] && [ "$hp_t" -lt "$HUD_PROBE_WAIT" ]; do sleep 1; hp_t=$((hp_t + 1)); done
+    hp_taken=1
+    if [ -f "$HP_CMD" ]; then rm -f "$HP_CMD"; hp_taken=0; fi
+    sleep "$HUD_PROBE_WAIT"
+    [ "$HP_WAS" -eq 1 ] || rm -f "$HP_DBG"
+    sed -n "$((hp_start + 1)),\$p" "$HP_LOG" > "$SHMEM/carplaymenu-hudprobe.txt" 2>/dev/null || :
+    HP_OUT=$SHMEM/carplaymenu-hudprobe.txt
+    say '--- the plugin during the probe ---'
+    grep -e 'HUD: debug log' -e 'name probes' -e 'HUD: cluster layout' "$HP_OUT" | sed -n 1,10p
+    if [ "$hp_taken" -eq 0 ]; then
+        say "The plugin's HUD did not take the test channel: is \"CarPlay directions in HUD\" on and the HMI running (HUD-only menu:"
+        say 'a CarPlay connection running)? Nothing was asked.'
+    fi
+    say '--- surfaces (ImageGetSize: handle = width x height; 0 x 0 and refusals left out) ---'
+    hp_n=0
+    while read -r hp_l; do
+        case "$hp_l" in *"fkt c04 op d "*) ;; *) continue ;; esac
+        set -- ${hp_l##*: }
+        if [ "$#" -ge 7 ]; then hp_w=$((16#$4$5)); hp_ht=$((16#$6$7)); hp_form=6WB
+        elif [ "$#" -ge 6 ]; then hp_w=$((16#$3$4)); hp_ht=$((16#$5$6)); hp_form=F54
+        else continue; fi
+        [ "$hp_w" -gt 0 ] && [ "$hp_ht" -gt 0 ] || continue
+        say "  0x$1$2: $hp_w x $hp_ht ($hp_form form)"
+        hp_n=$((hp_n + 1))
+    done < "$HP_OUT"
+    [ "$hp_n" -gt 0 ] || say '  none answered with a size'
+    say '--- the instance names (GetInstanceId 201 / 202) and every other answer to them ---'
+    grep -e 'fkt 201' -e 'fkt 202' "$HP_OUT" | grep -v 'HUD out' | sed -n 1,40p
+    say '--- errors from the terminal during the probe (op 9 / f: [code][parameter]) ---'
+    grep -e ' op 9 ' -e ' op f ' "$HP_OUT" | grep -v 'fkt c04' | sed -n 1,20p
+    say "--- (all $(count_lines "$HP_OUT") log lines of the probe are in $HP_OUT on the head unit) ---"
+    say 'SUCCESS: hud-probe completed.'
+}
+hexdig() { case "$1" in 10) echo a ;; 11) echo b ;; 12) echo c ;; 13) echo d ;; 14) echo e ;; 15) echo f ;; *) echo "$1" ;; esac; }
+hex2() {    # hex2 <0..255>: two lowercase hex digits (no printf, cut or awk on the head unit)
+    echo "$(hexdig $(($1 / 16)))$(hexdig $(($1 % 16)))"
+}
+count_lines() { set -- $(wc -l < "$1"); echo "${1:-0}"; }   # wc -l without tr
+one_line() { ol=; for ol_w in $1; do ol="$ol$ol_w "; done; echo "$ol"; }
+if [ "$ACTION" = hud-probe ]; then
+    hud_probe
+    exit $?
+fi
 
 # ---------------------------------------------------------------------------------------------------------------- restart
 if [ "$ACTION" = restart ]; then

@@ -142,6 +142,8 @@ sh carplay-advanced.sh install --dry-run      # every check and the plan, nothin
 sh carplay-advanced.sh status                 # what is installed, the links, the backups
 sh carplay-advanced.sh uninstall              # back to the original state (--keep-config keeps your switches)
 sh carplay-advanced.sh restart                # restart the head unit
+sh carplay-advanced.sh hud-probe              # HUD shows nothing? asks the cluster and the HUD what they have (~40 s, changes
+                                              # nothing; needs "CarPlay directions in HUD" on); saved in BACKUP/ for an issue
 ```
 
 Options: `--hud` / `--full` (turn-by-turn only, or everything), `--cluster most|kombi|both` (where the directions go, instead of
