@@ -389,6 +389,15 @@ double buffers. The HUD shows what the cluster's guidance shows. `hud.h` does th
   - No active route clears to the state the BMW navigation leaves at the end of a route.
 - **The BMW navigation wins**: any other client's drawing call on 82/00 (not an echo of ours; recent calls are hashed) means the BMW
   navigation is guiding. Nothing is drawn until 5 s after its last call, then the picture is drawn again.
+- **Cluster layout** (`detectLayout`, once, when the worker first has the HUDTerminal host): the navigation creates the handles, so
+  they differ per cluster. 6WA (F20) and the F54: 1..6 as above. **6WB** (BMW F-series multifunction cluster; map from
+  JayJay3071/nbt-android-auto, verified there on an old NBT): 0x17 the area, 0x1A/0x1B/0x1C street / distance / unit, 0x1F/0x20 the
+  double-buffered perspective plane 221 x 158. `ImageGetSize` (C04) is asked for 0x1F and 5 in both forms (`[h][01]` 6WB, `[h]` F54);
+  only a non-zero size counts (the F54 answers 0 x 0 for handles it lacks). 0x1F alone = 6WB: `use6wb` moves the picture from the 6WA
+  box to (66,40)-(166,140) and sends texts as ISO-8859-15 (encoding 01, JayJay). Also 6WB when the BMW navigation is seen drawing on
+  0x18..0x35 (above the F54's surfaces); the switch file `hud_layout` (`6wa` / `6wb`) decides instead. Logged: `layout probe`,
+  `cluster layout ...`, and every `registry: HUDTerminal 82/xx` instance (82/02 may be a separate HUD). The 6WB profile is untested
+  in a car (2026-11-15: a BMW F-series user, HUD dark with the 6WA handles).
 - **Picture box**: the shapes are drawn in the 6WA box (70,20)-(170,120). On a MINI (its layout present) every point is mapped to
   (35,15)-(85,65), where the F54 cluster's own navigation draws (captured in the car). `hud_box_6wa` keeps the 6WA box; `hud_mono`
   draws everything in the route colour.

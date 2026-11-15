@@ -8,6 +8,9 @@
 //     src/most, src/cluster/hudterm.hpp, hud6wa_profile.hpp), verified by them on an F20 ("6WA" cluster); the code here is ours.
 //     Every call is a StartResultAck method (op 6) to the owner of 0x82/00 in the registry; the cluster answers ResultAck (op 0xD).
 //     6WA instances: 1 frame, 2 street, 3 distance, 4 unit (texts), 5 and 6 the picture, double-buffered (SwitchVisibility).
+//     The navigation creates the instances, so they differ per cluster: the BMW F-series multifunction cluster ("6WB") has 0x17 the
+//     area, 0x1A/0x1B/0x1C the texts and 0x1F/0x20 a perspective plane of 221 x 158 (JayJay3071/nbt-android-auto, docs/
+//     CLUSTER-HUDTERMINAL.md, verified there on an old NBT). Which one this car has is asked with ImageGetSize (detectLayout).
 //   * the BMW navigation has priority: while another client sends commands to 0x82, nothing is drawn (and the picture is redrawn later).
 // Cars with an Ethernet KOMBI (G-series, J29) get the same guidance over SOME/IP from librghook-kombi.so in mm-ipod (src/rgkombi.cpp,
 // kombi.h), which the installer chose; the installer's cluster file says whether this plugin draws on MOST too (kombiOnly below).
@@ -99,6 +102,9 @@ volatile int g_attached, g_registered, g_lock;
 volatile u32 g_client;
 volatile u16 g_self, g_host, g_amHost;    // g_amHost: owner of AudioMaster 20/00 ("Media gestures", volume)
 volatile u32 g_navMs, g_answers, g_sent;  // last command of another client to 0x82 (BMW navigation), answers from the cluster
+// the layout probe (detectLayout): ImageGetSize answered for handle 5 (the 6WA picture) / 0x1F (the 6WB plane); the BMW navigation
+// seen drawing on a 6WB handle (0x18..0x35)
+volatile int g_size5, g_size1f, g_seen6wb;
 
 u32 nowMs() {
   hud_timespec t;
@@ -278,6 +284,13 @@ void onData(void *, void *is) {
   } else if (id == kAttrRegistry && len >= 4) {
     u32 cnt = rd32(p);
     u16 host = 0, am = 0;
+    static bool listed;  // once: every HUDTerminal instance in the registry (82/00 the cluster; others, e.g. 82/02, maybe a HUD)
+    for (u32 i = 0; i < cnt && 4 + i * 4 + 4 <= len && !listed; i++) {
+      u16 key = rd16(p + 4 + i * 4 + 2);
+      if (key >> 8 == kFBlock)
+        logf1("CarPlayMenu: HUD: registry: HUDTerminal 82/%02x at device %04x", key & 0xff, rd16(p + 4 + i * 4));
+    }
+    listed = listed || cnt > 0;
     for (u32 i = 0; i < cnt && 4 + i * 4 + 4 <= len; i++) {
       u16 key = rd16(p + 4 + i * 4 + 2);
       if (key == ((kFBlock << 8) | kInst) && !host)
@@ -302,6 +315,17 @@ void onData(void *, void *is) {
       g_answers++;
     u32 varTag = rd32(p + 4), varVal = rd32(p + 8);
     u16 fkt = rd16(p + 18);
+    // ImageGetSize answers: [handle][w][h] (F54, 6 bytes) or [handle][01][w][h] (6WB, 7 bytes), sizes u16 big-endian. The F54 also
+    // answers for handles it does not have, with 0 x 0: only a real size counts.
+    u32 an = len >= 32 ? rd32(p + 28) : 0;
+    if (fkt == 0xC04 && op == kOpResultAck && dst == g_self && (an == 6 || an == 7) && 32 + an <= len) {
+      const u8 *a = p + 32 + (an == 7 ? 3 : 2);
+      u16 h = (u16)(p[32] << 8 | p[33]), w = (u16)(a[0] << 8 | a[1]), ht = (u16)(a[2] << 8 | a[3]);
+      if (w && ht && h == 5)
+        g_size5 = 1;
+      if (w && ht && h == 0x1f)
+        g_size1f = 1;
+    }
     dbgMsg(src == g_self ? "echo" : dst == g_self ? "in  " : "seen", src, dst, fkt, op, p, len);
     bool normal = varTag == 2 && !(varVal >= 4 && varVal <= 9);  // not the send status of a message of ours
     bool drawing = (fkt >= 0x200 && fkt <= 0x22B) || (fkt >= 0xC03 && fkt <= 0xC09);
@@ -310,6 +334,8 @@ void onData(void *, void *is) {
     if (32 + dn > len)
       dn = 0;
     if (op <= 8 && src != g_self && normal && drawing && !isOurs(fkt, dd, dn)) {  // another client (the BMW navigation) drawing
+      if (dn >= 2 && (dd[0] << 8 | dd[1]) >= 0x18 && (dd[0] << 8 | dd[1]) <= 0x35)  // 6WB only: the F54's surfaces end at 0x17
+        g_seen6wb = 1;
       if (!g_navMs) {
         char m[120];
         snprintf(m, sizeof m, "CarPlayMenu: HUD: other client on 82/00: %04x -> %04x fkt %03x op %u", src, dst, fkt, op);
@@ -468,15 +494,12 @@ void chooseBox() {
   if (g_log)
     g_log(g_boxMini ? "CarPlayMenu: HUD: picture box MINI (35,15)-(85,65)" : "CarPlayMenu: HUD: picture box 6WA (70,20)-(170,120)");
 }
-enum {
-  hFrame = 1,
-  hStreet = 2,
-  hDist = 3,
-  hUnit = 4,
-  hBufA = 5,
-  hBufB = 6,
-  kFill = 4
-};  // 6WA profile (F20)
+// The handles: the 6WA profile (F20, NBT-AAD; also the MINI F54) unless detectLayout finds the 6WB layout.
+u16 hFrame = 1, hStreet = 2, hDist = 3, hUnit = 4, hBufA = 5, hBufB = 6;
+enum { kFill = 4 };  // the BMW navigation's colour on 6WA, F54 and 6WB alike (JayJay's 6WB recording: 21B 04 / 0A)
+// 6WB: texts in ISO-8859-15 (encoding 01, as verified there; the big distance font has no comma) and the picture moved from the 6WA
+// box (70,20)-(170,120) into the plane, centred on x 116 like JayJay's arrows: (66,40)-(166,140) of 221 x 158
+bool g_6wb;
 
 // a MOST message through DSYSMOSTServer: destination, FBlock, instance, function, OpType, data
 bool send(u16 dst, u8 fb, u8 inst, u16 fkt, u8 op, const u8 *d, u32 n) {
@@ -544,7 +567,7 @@ bool setText(u16 h, const char *s) {
   u32 n = 0;
   be16(d, h);
   n = 2;
-  d[n++] = 0;
+  d[n++] = g_6wb ? 1 : 0;  // 6WB: ISO-8859-15 (JayJay), else UTF-16BE
   const u8 *q = (const u8 *)s;
   for (u32 k = 0; *q && k < 32; k++) {
     u32 c = *q++, more = 0;
@@ -564,11 +587,16 @@ bool setText(u16 h, const char *s) {
       c = c << 6 | (*q++ & 0x3f);
     if (more || c < 0x20 || c > 0xffff || c == ',')
       c = ' ';
+    if (g_6wb) {
+      d[n++] = (u8)(c == 0x20ac ? 0xa4 : c <= 0xff ? c : '?');  // ISO-8859-15: the euro sign, the rest of Latin-1
+      continue;
+    }
     d[n++] = (u8)(c >> 8);
     d[n++] = (u8)c;
   }
   d[n++] = 0;
-  d[n++] = 0;
+  if (!g_6wb)
+    d[n++] = 0;
   return call(kSetText, d, n);
 }
 // filled (type 3). Convex pieces of up to kPiecePts points, or with whole (a whole polygon, up to kPolyPts: not hulled)
@@ -583,6 +611,11 @@ bool polygon(u16 h, u16 idx, const Pt *p, u32 k, bool whole = false) {
     if (k < 3)
       return true;
   }  // half size, the MINI cluster's picture area
+  if (g_6wb)
+    for (u32 i = 0; i < k; i++) {
+      q[i].x -= 4;
+      q[i].y += 20;
+    }  // the 6WB plane
   static u8 d[6 + 4 * kPolyPts];
   be16(d, h);
   be16(d + 2, idx);
@@ -797,7 +830,7 @@ void splitDist(const Guide &g, char *num_, char *unit) {
 // ---- drawing ------------------------------------------------------------------------------------------------------------------------
 volatile int g_enabled;
 bool g_shown, g_fresh = true;
-u16 g_visible = hBufB;
+u16 g_visible = 6;  // hBufB (a constant: no static initialiser in the plugin)
 u32 g_lastType = ~0u, g_lastIndex = ~0u;
 int g_lastAngle, g_lastJ;
 char g_lastRoad[96], g_lastNum[9], g_lastUnit[8];
@@ -954,8 +987,60 @@ bool kombiOnly() {
   return b[0] == 'k';
 }
 
+void use6wb(const char *why) {
+  hFrame = 0x17;
+  hStreet = 0x1a;
+  hDist = 0x1b;
+  hUnit = 0x1c;
+  hBufA = 0x1f;
+  hBufB = 0x20;
+  g_visible = hBufB;
+  g_6wb = true;
+  g_boxMini = false;
+  if (g_log) {
+    char m[160];
+    snprintf(m, sizeof m, "CarPlayMenu: HUD: cluster layout 6WB (%s): area 0x17, texts 0x1a-0x1c, picture 0x1f/0x20", why);
+    g_log(m);
+  }
+}
+// Which layout the cluster has: ImageGetSize (C04, it only reads) for the 6WB plane 0x1F and the 6WA picture 5, in the 6WB form
+// [handle][01] and the F54 form [handle]. Only the instances the navigation created have a size (the F54 answers 0 x 0 for the
+// others, measured 2026-11-13). 0x1F alone with a size = 6WB. The switch file hud_layout ("6wa" or "6wb") decides instead.
+void detectLayout() {
+  int fd = open("/var/opt/hmi/data/rw/carplaymenu/hud_layout", 0);
+  if (fd >= 0) {
+    char b[8] = { 0 };
+    long n = read(fd, b, sizeof b - 1);
+    close(fd);
+    (void)n;
+    if (b[0] == '6' && (b[2] == 'b' || b[2] == 'B')) {
+      use6wb("switch file hud_layout");
+      return;
+    }
+    if (b[0] == '6') {
+      if (g_log)
+        g_log("CarPlayMenu: HUD: cluster layout 6WA (switch file hud_layout)");
+      return;
+    }
+  }
+  const u8 p1[] = { 0, 0x1f, 1 }, p2[] = { 0, 5, 1 }, p3[] = { 0, 0x1f }, p4[] = { 0, 5 };
+  call(0xC04, p1, 3);
+  call(0xC04, p2, 3);
+  call(0xC04, p3, 2);
+  call(0xC04, p4, 2);
+  for (int i = 0; i < 30 && !(g_size1f && g_size5); i++)
+    usleep(50000);
+  logf1("CarPlayMenu: HUD: layout probe: ImageGetSize gave a size for 0x1f %u, for 5 %u", g_size1f, g_size5);
+  if (g_size1f && !g_size5)
+    use6wb("ImageGetSize");
+  else if (g_log)
+    g_log(g_size5 ? "CarPlayMenu: HUD: cluster layout 6WA (picture 5/6)"
+                  : "CarPlayMenu: HUD: cluster layout not answered: the 6WA profile; the BMW navigation's handles decide later");
+}
+
 void *worker(void *) {
   u32 lastLog = 0;
+  bool probed = false;
   bool kombi = kombiOnly();
   if (kombi && g_log)
     g_log("CarPlayMenu: HUD: cluster 'kombi': the directions go to the KOMBI from librghook-kombi.so, nothing drawn on MOST");
@@ -967,6 +1052,12 @@ void *worker(void *) {
     runCmds();
     if (kombi)
       continue;
+    if (!probed) {
+      probed = true;
+      detectLayout();
+    }
+    if (g_seen6wb && !g_6wb && !g_shown)  // the BMW navigation drew on 6WB handles: this cluster is a 6WB
+      use6wb("the BMW navigation draws on 0x18..0x35");
     bool nav = g_navMs && nowMs() - g_navMs < 5000;  // the BMW navigation uses the terminal: it has priority
     if (nav) {
       if (g_shown) {

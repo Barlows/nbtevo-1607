@@ -25,7 +25,7 @@ LC_ALL=C
 export LC_ALL
 umask 022
 
-VERSION=1.1.0
+VERSION=1.1.1
 REMOTE_NODE=/net/hu-omap
 STAGE=/fs/sda1/opt/carplay-advanced-upload            # upload folder on hu-omap (runs from a computer), removed afterwards
 SSH_HOST=root@169.254.199.99                          # the head unit over ENET (sshd on hu-jacinto)
@@ -57,6 +57,7 @@ LOCK=/var/opt/carplay-advanced.lock
 ONOFF_BINS='/opt/core/bin/OnOffDSICommander /opt/car/bin/OnOffDSICommander'
 ONOFF_JACINTO=/net/hu-jacinto/opt/car/bin/OnOffDSICommander     # checked from hu-omap; run as: on -f <node> <program>
 ONOFF_JACINTO_NODE=hu-jacinto
+REBOOT_CONFIRM_S=75                                   # the computer waits this long for "restarting" (appreset + RESTART_WAIT + libcpreboot)
 RESTART_WAIT=20                                       # seconds an appreset gets before libcpreboot.so restarts the unit instead
 ONOFF_JACINTO_BIN=/opt/car/bin/OnOffDSICommander
 PROBE_HOST=/bin/cat                                   # runs libcpprobe.so as LD_PRELOAD: its constructor prints one line and exits
@@ -407,7 +408,7 @@ restart_unit() {
 
 usage() {
     cat <<'EOF'
-CarPlay Advanced Settings installer 1.1.0 (NBT Evo iDrive 5 / iDrive 6)
+CarPlay Advanced Settings installer 1.1.1 (NBT Evo iDrive 5 / iDrive 6)
 Usage: sh carplay-advanced.sh install|uninstall|status|restart [options]
   --host user@address   From a computer: the head unit to connect to (default root@169.254.199.99)
   --full                Install the full plugin (menu, HMI patches, fullscreen, knob/touchpad, HUD). Default on iDrive 5.
@@ -678,6 +679,15 @@ EOF
     # A reboot never answers: the head unit goes down with the connection open, and ssh would wait for its timeout. So the restart runs
     # in the background, its lines are shown as they come, and once the head unit says it reboots the installer stops waiting.
     reboot_said() { grep 'rebooting the head unit' "$1" >/dev/null 2>&1 || grep 'Restarting the head unit (.*OnOffDSICommander' "$1" >/dev/null 2>&1; }
+    # The restart runs this script from the upload folder (as "restart" does), not from stdin: after an install on a BMW F-series unit
+    # "/bin/sh -s" through on -f gave no line in 40 s, while "restart" from the upload answered at once. libcpreboot.so goes along: a
+    # head unit without the plugin (or OnOffDSICommander) has nothing else to reboot with.
+    restart_staged() {
+        omap "/bin/ksh -c 'mkdir -p $STAGE'" < /dev/null || die "Cannot create $STAGE on hu-omap."
+        send "$0" "$STAGE/carplay-advanced.sh"
+        if [ -f "$SRC/libcpreboot.so" ]; then send "$SRC/libcpreboot.so" "$STAGE/libcpreboot.so"; fi
+        remote_reboot "/bin/sh $STAGE/carplay-advanced.sh restart" /dev/null
+    }
     remote_reboot() {    # remote_reboot <command on hu-omap> <stdin file>: 0 once the reboot is under way
         rb_out=$WORK/reboot.out; : > "$rb_out"
         omap "$1" < "$2" > "$rb_out" 2>&1 &
@@ -687,7 +697,7 @@ EOF
             if [ "$rb_n" -gt "$rb_shown" ]; then sed -n "$((rb_shown + 1)),${rb_n}p" "$rb_out" | show_remote; rb_shown=$rb_n; fi
             if reboot_said "$rb_out"; then sleep 2; break; fi
             kill -0 "$rb_pid" 2>/dev/null || break
-            rb_t=$((rb_t + 1)); [ "$rb_t" -lt 40 ] || break
+            rb_t=$((rb_t + 1)); [ "$rb_t" -lt "$REBOOT_CONFIRM_S" ] || break
             sleep 1
         done
         if reboot_said "$rb_out"; then
@@ -695,7 +705,7 @@ EOF
             ok 'The head unit is restarting; it is back in about a minute.'
             return 0
         fi
-        if kill -0 "$rb_pid" 2>/dev/null; then kill "$rb_pid" 2>/dev/null || :; die 'The head unit did not confirm the restart in 40 s.'; fi
+        if kill -0 "$rb_pid" 2>/dev/null; then kill "$rb_pid" 2>/dev/null || :; die "The head unit did not confirm the restart in $REBOOT_CONFIRM_S s."; fi
         rb_rc=0; wait "$rb_pid" || rb_rc=$?
         sed -n "$((rb_shown + 1)),\$p" "$rb_out" | show_remote
         # 255: the connection dropped, which is how a reboot usually ends it
@@ -902,9 +912,7 @@ Installer: $VERSION"
         *) step "$ACTION on the head unit" ;;
     esac
     if [ "$ACTION" = restart ]; then
-        # libcpreboot.so goes along: a head unit without the plugin (or OnOffDSICommander) has nothing else to reboot with
-        if [ -f "$SRC/libcpreboot.so" ]; then send "$SRC/libcpreboot.so" "$STAGE/libcpreboot.so"; fi
-        remote_reboot "/bin/sh $STAGE/carplay-advanced.sh restart" /dev/null || exit $?
+        restart_staged || exit $?
         exit 0
     fi
     { run_rc=0; omap "/bin/sh $STAGE/carplay-advanced.sh $args" < /dev/null 2>&1 || run_rc=$?; echo "$run_rc" > "$WORK/rc"; } \
@@ -979,7 +987,7 @@ Installer: $VERSION"
     if [ "$RESTART" -eq 1 ] && [ "$rc" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
         step 'Restarting the head unit'
         say 'The connection closes with it; the head unit is back in about a minute.'
-        remote_reboot '/bin/sh -s -- restart' "$0" || exit $?
+        restart_staged || exit $?
     fi
     exit "$rc"
 fi
@@ -1092,6 +1100,7 @@ link_state() {
 if [ "$ACTION" = restart ]; then
     if [ "$DRY_RUN" -eq 1 ]; then say 'DRY RUN: the head unit would be restarted.'; exit 0; fi
     restart_unit
+    exit 0                                          # restart only: never on into the install / uninstall below
 fi
 
 # ---------------------------------------------------------------------------------------------------------------- the cluster
