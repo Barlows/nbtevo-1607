@@ -932,6 +932,7 @@ void drawClear() {  // the state the BMW navigation leaves the terminal in at th
 }
 
 // Test channel: /dev/shmem/carplaymenu-hudcmd, one HUDTerminal call per line, "fkt hexbytes" (e.g. "21d 0005000003040070007800800078"),
+// a line "@2" sends the following calls to HUDTerminal 82/02 (a windscreen HUD's own terminal; "@0" back to the cluster's 82/00),
 // run once and the file deleted; to try a cluster's layout without rebuilding the plugin. Lines starting with # are skipped. Each
 // batch restarts the 600-line HUD debug log, so its calls and the cluster's answers land in the log (tools/hud_probe.sh).
 const char *const kCmd = "/dev/shmem/carplaymenu-hudcmd";
@@ -953,13 +954,18 @@ void runCmds() {
   g_dbg = 0;  // log this batch and the cluster's answers, even after the first 600 lines and without debug_log
   g_probeMs = nowMs() | 1;
   u32 ran = 0;
+  u8 inst = 0;  // "@2": the following calls go to 82/02
   for (char *l = b; *l;) {
     char *e = l;
     while (*e && *e != '\n')
       e++;
     char sv = *e;
     *e = 0;
-    if (*l && *l != '#') {
+    if (*l == '@') {
+      inst = (u8)(l[1] == '2' ? 2 : 0);
+      if (inst && !g_host2 && g_log)
+        g_log("CarPlayMenu: HUD: test channel: no HUDTerminal 82/02 in the registry, its calls are skipped");
+    } else if (*l && *l != '#') {
       u32 fkt = 0;
       char *q = l;
       while (hexv(*q) >= 0)
@@ -978,8 +984,14 @@ void runCmds() {
           hi = -1;
         }
       }
-      if (fkt) {
+      if (fkt && inst == 0) {
         call((u16)fkt, d, k);
+        ran++;
+      } else if (fkt && g_host2) {
+        noteSent((u16)fkt, d, k);
+        dbgLine("out 82/02", (u16)fkt, kOpStartResultAck, d, k);
+        send(g_host2, kFBlock, 2, (u16)fkt, kOpStartResultAck, d, k);
+        usleep(20000);
         ran++;
       }
     }

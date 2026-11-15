@@ -322,6 +322,7 @@ hmi_scan() {
 }
 
 ACTION=
+PROBE_STEP=                                          # hud-probe's visual check, one test picture: <picture>:draw|clear (internal)
 PAYLOAD=
 HOST_SET=0
 SOFTWARE=
@@ -412,8 +413,11 @@ usage() {
 CarPlay Advanced Settings installer 1.1.1 (NBT Evo iDrive 5 / iDrive 6)
 Usage: sh carplay-advanced.sh install|uninstall|status|restart|hud-probe [options]
   hud-probe             Ask the cluster / HUD what it has (about 40 s, nothing installed or changed): the plugin's HUD state,
-                        the HUDTerminal instances, the surfaces and their sizes, the navigation's instance names. Needs the
-                        plugin with "CarPlay directions in HUD" on; from a computer the output is also saved in BACKUP/.
+                        the HUDTerminal instances, the surfaces and their sizes, the navigation's instance names. Then, on a
+                        terminal, a visual check: five test pictures (6WA, MINI, 6WB layouts; cluster terminal 82/00 and HUD
+                        terminal 82/02), each asked "do you see it on the cluster / on the HUD?". Needs the plugin with
+                        "CarPlay directions in HUD" on and no route guiding; from a computer the output and the answers are
+                        saved in BACKUP/.
   --host user@address   From a computer: the head unit to connect to (default root@169.254.199.99)
   --full                Install the full plugin (menu, HMI patches, fullscreen, knob/touchpad, HUD). Default on iDrive 5.
   --hud                 Install turn-by-turn directions (from the next CarPlay connection, no reboot) and the HUD-only menu
@@ -452,6 +456,9 @@ parse_args() {
         --host)
             [ "$#" -ge 2 ] || die '--host needs user@address.'
             SSH_HOST=$2; HOST_SET=1; shift ;;
+        --probe-step)
+            [ "$#" -ge 2 ] || die '--probe-step needs <picture>:draw|clear.'
+            PROBE_STEP=$2; shift ;;
         --payload)
             [ "$#" -ge 2 ] || die '--payload needs a folder.'
             PAYLOAD=$2; shift ;;
@@ -683,6 +690,41 @@ EOF
     # A reboot never answers: the head unit goes down with the connection open, and ssh would wait for its timeout. So the restart runs
     # in the background, its lines are shown as they come, and once the head unit says it reboots the installer stops waiting.
     reboot_said() { grep 'rebooting the head unit' "$1" >/dev/null 2>&1 || grep 'Restarting the head unit (.*OnOffDSICommander' "$1" >/dev/null 2>&1; }
+    # hud-probe's visual check: each test picture is drawn, you say whether the cluster and the HUD show it, and it is cleared. The
+    # answers go into the saved output (they settle the layout where the terminal's own answers do not). Only on a terminal.
+    ask_seen() {    # ask_seen <where>: y / n / ? from the terminal
+        printf '    %s: do you see the white square / TEST? [y/n/?] ' "$1"
+        as_a=; read -r as_a < /dev/tty || as_a=?
+        case "$as_a" in [Yy]*) echo y ;; [Nn]*) echo n ;; *) echo '?' ;; esac
+    }
+    hud_visual_check() {
+        if [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ] || [ ! -r /dev/tty ]; then
+            note 'Visual check skipped (no terminal): run hud-probe on a terminal to answer what the cluster and the HUD show.'
+            return 0
+        fi
+        step 'Visual check: what the cluster and the HUD show'
+        say 'Stop any route first (the BMW navigation or CarPlay would draw over the test pictures). Each picture stays until you answer.'
+        printf '\n  Start the visual check? [Y/n] '
+        vc_a=; read -r vc_a < /dev/tty || vc_a=n
+        case "$vc_a" in ''|[Yy]*) ;; *) say 'Visual check skipped.'; return 0 ;; esac
+        echo '--- visual check (your answers) ---' >> "$WORK/out"
+        for vc in '6wa:6WA layout (BMW F-series old cluster) on 82/00' 'mini:MINI F54 picture box on 82/00' \
+                  '6wb:6WB layout (BMW multifunction cluster) on 82/00' '6wa-hud:6WA layout on the HUD terminal 82/02' \
+                  '6wb-hud:6WB layout on the HUD terminal 82/02'; do
+            vc_n=${vc%%:*}
+            say "$vc_n: ${vc#*:}"
+            vc_r=$(omap "/bin/sh $STAGE/carplay-advanced.sh hud-probe --probe-step $vc_n:draw" < /dev/null 2>&1) || :
+            case "$vc_r" in
+                *'PROBE-STEP'*' taken'*) ;;
+                *) note "the plugin did not take the test picture ($vc_r)"; echo "$vc_n: not drawn ($vc_r)" >> "$WORK/out"; continue ;;
+            esac
+            vc_c=$(ask_seen cluster)
+            vc_h=$(ask_seen HUD)
+            omap "/bin/sh $STAGE/carplay-advanced.sh hud-probe --probe-step $vc_n:clear" < /dev/null > /dev/null 2>&1 || :
+            echo "$vc_n: cluster $vc_c, HUD $vc_h" >> "$WORK/out"
+            ok "$vc_n: cluster $vc_c, HUD $vc_h"
+        done
+    }
     # The restart runs this script from the upload folder (as "restart" does), not from stdin: after an install on a BMW F-series unit
     # "/bin/sh -s" through on -f gave no line in 40 s, while "restart" from the upload answered at once. libcpreboot.so goes along: a
     # head unit without the plugin (or OnOffDSICommander) has nothing else to reboot with.
@@ -923,6 +965,7 @@ Installer: $VERSION"
     { run_rc=0; omap "/bin/sh $STAGE/carplay-advanced.sh $args" < /dev/null 2>&1 || run_rc=$?; echo "$run_rc" > "$WORK/rc"; } \
         | tee "$WORK/out" | show_remote
     read -r rc < "$WORK/rc" || rc=1
+    if [ "$ACTION" = hud-probe ] && [ "$rc" -eq 0 ]; then hud_visual_check; fi
     omap "/bin/ksh -c 'rm -rf $STAGE'" < /dev/null > /dev/null 2>&1 || say "Note: $STAGE is left on hu-omap (removed by the next run)."
     if [ "$ACTION" = hud-probe ]; then
         out=$LOCAL_BACKUPS/hud-probe-$(date +%Y%m%d-%H%M%S).txt
@@ -1188,6 +1231,41 @@ hex2() {    # hex2 <0..255>: two lowercase hex digits (no printf, cut or awk on 
 }
 count_lines() { set -- $(wc -l < "$1"); echo "${1:-0}"; }   # wc -l without tr
 one_line() { ol=; for ol_w in $1; do ol="$ol$ol_w "; done; echo "$ol"; }
+printf_lines() { for pl_l in "$@"; do echo "$pl_l"; done; }
+# The visual check's test pictures: a white filled square in the layout's picture area and "TEST" as the distance, shown with that
+# layout's visibility calls; "clear" removes it and hides what it showed. "-hud": the same on HUDTerminal 82/02.
+probe_pattern() {    # probe_pattern <name> draw|clear: a test-channel batch (generated; white square + "TEST" as distance)
+    case "$1:$2" in
+        6wa:draw) printf_lines '204 000101' '20e 00050006' '220 0006' '219 000600' '21b 000604' '21d 000600000304005a00280096002800960064005a0064' '204 000301' '210 00030000540045005300540000' ;;
+        6wa:clear) printf_lines '220 0006' '210 0003000000' '204 000300' '204 000100' ;;
+        6wa-hud:draw) printf_lines '@2' '204 000101' '20e 00050006' '220 0006' '219 000600' '21b 000604' '21d 000600000304005a00280096002800960064005a0064' '204 000301' '210 00030000540045005300540000' ;;
+        6wa-hud:clear) printf_lines '@2' '220 0006' '210 0003000000' '204 000300' '204 000100' ;;
+        mini:draw) printf_lines '204 000101' '20e 00050006' '220 0006' '219 000600' '21b 000604' '21d 000600000304002d0019004b0019004b0037002d0037' '204 000301' '210 00030000540045005300540000' ;;
+        mini:clear) printf_lines '220 0006' '210 0003000000' '204 000300' '204 000100' ;;
+        mini-hud:draw) printf_lines '@2' '204 000101' '20e 00050006' '220 0006' '219 000600' '21b 000604' '21d 000600000304002d0019004b0019004b0037002d0037' '204 000301' '210 00030000540045005300540000' ;;
+        mini-hud:clear) printf_lines '@2' '220 0006' '210 0003000000' '204 000300' '204 000100' ;;
+        6wb:draw) printf_lines '204 001701' '204 002000' '204 001f01' '220 001f' '219 001f06' '21b 001f04' '21d 001f0000030400560050009200500092008c0056008c' '21d 001f0100020500560050009200500092008c0056008c00560050' '204 001b01' '210 001b015445535400' ;;
+        6wb:clear) printf_lines '220 001f' '210 001b0100' '204 001b00' '204 001700' ;;
+        6wb-hud:draw) printf_lines '@2' '204 001701' '204 002000' '204 001f01' '220 001f' '219 001f06' '21b 001f04' '21d 001f0000030400560050009200500092008c0056008c' '21d 001f0100020500560050009200500092008c0056008c00560050' '204 001b01' '210 001b015445535400' ;;
+        6wb-hud:clear) printf_lines '@2' '220 001f' '210 001b0100' '204 001b00' '204 001700' ;;
+        *) return 1 ;;
+    esac
+}
+
+hud_probe_step() {    # one test picture through the plugin's test channel; prints whether the plugin took it
+    hs_cmd=$SHMEM/carplaymenu-hudcmd
+    hs_batch=$(probe_pattern "${PROBE_STEP%%:*}" "${PROBE_STEP##*:}") || { say "Unknown test picture: $PROBE_STEP"; return 1; }
+    [ ! -f "$hs_cmd" ] || { say 'PROBE-STEP busy'; return 1; }
+    echo "$hs_batch" > "$hs_cmd.tmp" && mv "$hs_cmd.tmp" "$hs_cmd"
+    hs_t=0
+    while [ -f "$hs_cmd" ] && [ "$hs_t" -lt "$HUD_PROBE_WAIT" ]; do sleep 1; hs_t=$((hs_t + 1)); done
+    if [ -f "$hs_cmd" ]; then rm -f "$hs_cmd"; say "PROBE-STEP $PROBE_STEP not taken"; return 1; fi
+    say "PROBE-STEP $PROBE_STEP taken"
+}
+if [ "$ACTION" = hud-probe ] && [ -n "$PROBE_STEP" ]; then
+    hud_probe_step
+    exit $?
+fi
 if [ "$ACTION" = hud-probe ]; then
     hud_probe
     exit $?

@@ -512,6 +512,27 @@ class InstallTest(Base):
         self.assertIn('fkt 201 op d len 4: 00 00 00 1f', out)
         self.assertTrue((self.p['SETTINGS'] / 'hud_debug').exists())
 
+    def test_hud_probe_step_draws_a_test_picture(self):
+        self.hud_probe_script()
+        shm = self.p['SHMEM']
+        shm.mkdir(parents=True, exist_ok=True)
+        got = self.root / 'batch.txt'
+        fake = ('for i in $(seq 1 50); do if [ -f "$1/carplaymenu-hudcmd" ]; then mv "$1/carplaymenu-hudcmd" "$2"; exit 0; fi; '
+                'sleep 0.1; done\n')
+        (self.root / 'fake.sh').write_text(fake)
+        bg = subprocess.Popen(['/bin/sh', str(self.root / 'fake.sh'), str(shm), str(got)])
+        self.addCleanup(bg.kill)
+        out = self.run_script('hud-probe', '--probe-step', '6wb-hud:draw')
+        self.assertIn('PROBE-STEP 6wb-hud:draw taken', out)
+        lines = got.read_text().split()
+        self.assertEqual(lines[0], '@2')                                              # to the HUD terminal 82/02
+        self.assertIn('001701', ' '.join(lines))                                      # 6WB: the area 0x17 shown
+        bg.wait(5)
+        out = self.run_script('hud-probe', '--probe-step', 'mini:clear', rc=1)        # nobody takes it now
+        self.assertIn('PROBE-STEP mini:clear not taken', out)
+        self.assertFalse((shm / 'carplaymenu-hudcmd').exists())
+        self.assertIn('Unknown test picture', self.run_script('hud-probe', '--probe-step', 'x:draw', rc=1))
+
     def test_restart_finds_onoff_outside_the_path(self):
         # on the car the SSH shell's PATH has no /opt/core/bin: the installer looks there itself (ONOFF_BINS)
         (self.bin / 'OnOffDSICommander').rename(self.root / 'OnOffDSICommander')
@@ -708,6 +729,7 @@ class FromComputerTest(Base):
         (saved,) = (self.root / 'BACKUP').glob('hud-probe-*.txt')
         self.assertIn('SUCCESS: hud-probe completed', saved.read_text())
         self.assertNotIn('Checking the head unit software', out)                      # no 60 MB read for a probe
+        self.assertIn('Visual check skipped (no terminal)', out)
         self.assertFalse(self.p['STAGE'].exists())
 
     def test_mmipod_unknown_is_a_note(self):

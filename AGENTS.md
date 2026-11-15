@@ -416,6 +416,10 @@ double buffers. The HUD shows what the cluster's guidance shows. `hud.h` does th
     forms through the test channel, and the answers parsed from the plugin log (surfaces with a size, 201/202 answers, errors).
     `hud_debug` is put back as it was; `HUD_PROBE_WAIT` (8 s) per step. Needs the plugin with its HUD running (HUD-only: during
     a CarPlay connection).
+  - **Visual check** (computer, on a terminal; `--yes` or no terminal skips it): five test pictures (`probe_pattern`, generated
+    batches: a white square + "TEST" as the distance with that layout's visibility calls) for 6WA, the MINI box and 6WB on 82/00,
+    and 6WA / 6WB on 82/02 (the test channel's `@2` line, hud.h `runCmds`). Each is drawn (`--probe-step <name>:draw`, internal),
+    you answer cluster y/n/? and HUD y/n/?, it is cleared; the answers are appended to the saved output.
   - **Name probes** (`probeNames`, only when "HUD debug log" is switched on): 201 and 202 with `[0000][01][name][00]` for five names,
     to 82/00 and, if the registry has it, 82/02; the answers are logged, nothing is decided from them yet. The leading 0000 keeps it
     harmless if one of the numbers is ReleaseInstance.
