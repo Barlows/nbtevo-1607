@@ -37,7 +37,7 @@ The menu:
 Media/Radio > CarPlay Advanced Settings
   Full-screen CarPlay
   CarPlay directions in HUD
-  HUD effects >        Fill toward the turn / Blink near the turn / Effect colour > (Orange, Grey, White)
+  HUD effects >        Fill toward the turn / Blink near the turn / Effect colour > (Orange, Grey, White) / HUD debug log
   iDrive control >     Enable knob tilts
                        Touchpad >   Enable touchpad / Tap touchpad as click / Touchpad sensitivity > (Low, Medium, High)
                                     / Two fingers tap to back
@@ -51,7 +51,7 @@ puts on the turn-by-turn part by default (`--hud`), with a **HUD-only menu** in 
 ```
 Media/Radio > CarPlay Advanced Settings
   CarPlay directions in HUD
-  HUD effects >        Fill toward the turn / Blink near the turn / Effect colour > (Orange, Grey, White)
+  HUD effects >        Fill toward the turn / Blink near the turn / Effect colour > (Orange, Grey, White) / HUD debug log
 ```
 
 It changes nothing in the HMI itself, and its switches apply at the next CarPlay connection (no restart). The HMI shows it only when the

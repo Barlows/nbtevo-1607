@@ -202,6 +202,7 @@ enum {
   OPT_HUD,
   OPT_FILL,
   OPT_BLINK,
+  OPT_HUDDBG,
   OPT_N
 };
 Option g_options[OPT_N] = {
@@ -214,6 +215,7 @@ Option g_options[OPT_N] = {
   { "hud_guidance", 8, 19, "CarPlay directions in the HUD", false },
   { "hud_fill", 84, 85, "Fill toward the turn", false },
   { "hud_blink", 88, 89, "Blink near the turn", false },
+  { "hud_debug", 108, 109, "HUD debug log", false },  // hud.h checks the file every 5 s: in the HMI and in mm-ipod (HUD-only)
 };
 const unsigned kActRestart = 9;
 bool g_media, g_padTilts;  // test switches media_gestures, touchpad_tilts
@@ -1482,7 +1484,7 @@ const bool kHudOnly = true;
 const bool kHudOnly = false;
 #endif
 inline bool inHudMenu(int i) {
-  return i == OPT_HUD || i == OPT_FILL || i == OPT_BLINK;
+  return i == OPT_HUD || i == OPT_FILL || i == OPT_BLINK || i == OPT_HUDDBG;
 }
 
 void applyAtStart() {
@@ -1555,6 +1557,13 @@ bool toggle(int i) {
   if (g_safe) {  // saved only: applied after Restart to apply, which leaves safe mode
     char b[160];
     snprintf(b, sizeof b, "CarPlayMenu: %s -> %s (safe mode: applies after restart)", g_options[i].label, on ? "ON" : "OFF");
+    logLine(b);
+    return true;
+  }
+  if (i == OPT_HUDDBG) {  // no restart: the HUD (here, or in mm-ipod with the HUD-only menu) sees the file within 5 s
+    char b[200];
+    snprintf(b, sizeof b, "CarPlayMenu: %s -> %s (HUDTerminal calls and answers go to %s)", g_options[i].label, on ? "ON" : "OFF",
+             kHudOnly ? "/var/iap/rghook.log" : "this log");
     logLine(b);
     return true;
   }
@@ -1684,6 +1693,9 @@ bool onHud(void *, const bmw::Parcel &) {
 bool onFill(void *, const bmw::Parcel &) {
   return toggle(OPT_FILL);
 }
+bool onHudDbg(void *, const bmw::Parcel &) {
+  return toggle(OPT_HUDDBG);
+}
 bool onBlink(void *, const bmw::Parcel &) {
   return toggle(OPT_BLINK);
 }
@@ -1724,7 +1736,7 @@ void *g_vtbl[2 + kVtblSlots];
 
 bool appOnInit(bmw::PluginApp *self) {
   typedef bool (*Stub)(void *, const bmw::Parcel &);
-  static const Stub stubs[OPT_N] = { onFullscreen, onKnob, onPad, onTap, onTwo, onZoom, onHud, onFill, onBlink };
+  static const Stub stubs[OPT_N] = { onFullscreen, onKnob, onPad, onTap, onTwo, onZoom, onHud, onFill, onBlink, onHudDbg };
   static const Stub sens[3] = { onSensLow, onSensMid, onSensHigh };
   for (int i = 0; i < OPT_N; i++) {
     if (kHudOnly && !inHudMenu(i))

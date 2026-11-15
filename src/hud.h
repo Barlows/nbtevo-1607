@@ -44,8 +44,10 @@ void (*g_log)(const char *) = 0;
 // Switch debug_log (the library's cached check): the per-event lines (every HUDTerminal message, every maneuver and fill step) only
 // with it; none = off. Without it the log keeps start-up, errors (the cluster's op f / op 9 answers) and the rare state changes.
 bool (*g_debug)() = 0;
+// Menu "HUD debug log" (switch file hud_debug, checked by the worker every 5 s): the HUD's own debug lines without debug_log
+volatile int g_hudDebug;
 bool verbose() {
-  return g_debug && g_debug();
+  return g_hudDebug || (g_debug && g_debug());
 }
 const char *const kPps = "/var/iap/pps/routeguidance";
 
@@ -1041,6 +1043,7 @@ void detectLayout() {
 void *worker(void *) {
   u32 lastLog = 0;
   bool probed = false;
+  u32 dbgTick = 0;
   bool kombi = kombiOnly();
   if (kombi && g_log)
     g_log("CarPlayMenu: HUD: cluster 'kombi': the directions go to the KOMBI from librghook-kombi.so, nothing drawn on MOST");
@@ -1055,6 +1058,22 @@ void *worker(void *) {
     if (!probed) {
       probed = true;
       detectLayout();
+    }
+    if (++dbgTick % 10 == 1) {  // about every 5 s: the menu's "HUD debug log"
+      int f = open("/var/opt/hmi/data/rw/carplaymenu/hud_debug", 0);
+      int on = f >= 0;
+      if (f >= 0)
+        close(f);
+      if (on && !g_hudDebug) {
+        g_dbg = 0;  // the next 600 HUDTerminal lines go to the log
+        char m[200];
+        snprintf(m, sizeof m, "CarPlayMenu: HUD: debug log on: layout %s, HUDTerminal at %04x, %u calls sent, %u answered, size 0x1f %u / 5 %u",
+                 g_6wb ? "6WB" : g_boxMini ? "6WA (MINI box)" : "6WA", g_host, g_sent, g_answers, g_size1f, g_size5);
+        if (g_log)
+          g_log(m);
+      } else if (!on && g_hudDebug && g_log)
+        g_log("CarPlayMenu: HUD: debug log off");
+      g_hudDebug = on;
     }
     if (g_seen6wb && !g_6wb && !g_shown)  // the BMW navigation drew on 6WB handles: this cluster is a 6WB
       use6wb("the BMW navigation draws on 0x18..0x35");

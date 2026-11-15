@@ -170,6 +170,7 @@ boot.sh (from /bin/start_screen.sh): path-manager links for the layout, carplay.
 | HUD effects > (81) Fill toward the turn | 84 / 85 | `hud_fill` | after restart (read when the HUD starts) |
 | ... > Blink near the turn | 88 / 89 | `hud_blink` | after restart |
 | ... > Effect colour > (93) Orange / Grey / White | 96-98 / 99-101 | `hud_colour` = 5 / 3 / 4 (no file: 5, Orange) | after restart |
+| ... > HUD debug log | 108 / 109 | `hud_debug` | within 5 s (`hud.h` checks the file; the HUD-only menu's lines go to `/var/iap/rghook.log`): a summary line (layout, host, calls), then the next 600 HUDTerminal messages |
 | iDrive control > (41) Enable knob tilts | 6 / 17 | `remap_knob` | after restart |
 | ... > Touchpad > (44) Enable touchpad | 7 / 18 | `remap_touchpad` | after restart |
 | ... > Touchpad > Tap touchpad as click | 46 / 47 | `tap_click` | at once (hook installed) |
@@ -662,7 +663,7 @@ built and checked against the package's layouts only, **untested in a car** (nor
 |---|---|
 | `/var/opt/hmi/data/rw/Plugins/CarPlayMenu/` | the plugin (= `/fs/sda1/opt/hmi/data/ID5/Plugins/CarPlayMenu` at boot) |
 | `/var/opt/hmi/data/rw/carplaymenu/` | switches; the generated `Spec_State_Merged.pbw` (MINI) or `Spec_State_Merged-common.pbw` (BMW), `carplay.ini`, `carplay-conn.ini`; the wrappers `mm-ipod` and `Connectivity`; `bin/` copies of the originals; `cluster`; `boot_pending`, `boot_strikes`, `safe_mode`; `menu_v2` |
-| switch files | `fullscreen`, `remap_knob`, `remap_touchpad`, `tap_click`, `two_finger`, `touchpad_mm`, `knob_zoom`, `hud_guidance`, `hud_fill`, `hud_blink`, `hud_colour` |
+| switch files | `fullscreen`, `remap_knob`, `remap_touchpad`, `tap_click`, `two_finger`, `touchpad_mm`, `knob_zoom`, `hud_guidance`, `hud_fill`, `hud_blink`, `hud_colour`, `hud_debug`; `hud_layout` (`6wa` / `6wb`, no menu row) |
 | test switches | `fullscreen_ini`, `no_pinch`, `knob_nudge`, `knob_repeat`, `no_knob_repeat`, `zoom_reverse`, `touchpad_tilts`, `media_gestures`, `touch_log`, `ctl_log`, `hud_box_6wa`, `hud_mono`, `hud_convex`, `screen_size`, `zoom_at` |
 | `/dev/shmem/carplaymenu-knob`, `-pad` | plugin -> libcppinch: directions, both touchpad fingers |
 | `/dev/shmem/carplaymenu-hudcmd` | the HUDTerminal test channel |
