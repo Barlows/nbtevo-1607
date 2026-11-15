@@ -399,6 +399,20 @@ double buffers. The HUD shows what the cluster's guidance shows. `hud.h` does th
   0x18..0x35 (above the F54's surfaces); the switch file `hud_layout` (`6wa` / `6wb`) decides instead. Logged: `layout probe`,
   `cluster layout ...`, and every `registry: HUDTerminal 82/xx` instance (82/02 may be a separate HUD). The 6WB profile is untested
   in a car (2026-11-15: a BMW F-series user, HUD dark with the 6WA handles).
+  - **6WB drawing**: every polygon also goes as a closed outline (type 2, item + 0x100) with line width 6. The navigation sets up
+    each instance itself at start (line width, line colour, fill colour, fill mode 21C) and its 6WB look is outlines; JayJay's
+    visible arrows there were polylines with width 6. Our line width 0 + filled polygons may show nothing under its fill mode.
+  - **Instance names** (BMW navigation `NavNBTEvoController` 006): it creates its instances by name in two back-ends,
+    `CIcHudComm_TF1_3` ("Old IC": `TopFrame`, `TopFrame2/3`, `1.GuidingIcon`/`2.GuidingIcon`, `1.DecreasingArrow`,
+    `1.LaneGuidance`, `ComingStreet`, `Distance`, `Unit`, `Potentiometer`, `Bargraph3`, `1.JunctionView`) and
+    `CIcHudComm_TF11_13` ("FPK" freely programmable cluster: `Top_Frame_11/12/13`, `Coming_Road_11_1`, `Distance_11_1`,
+    `Unit_11_1`, `Guiding_Arrow_11_1/_2`, `Lane_Guiding_11_1/_2`, `Bargraph_11_1`, `Junction_View_12_1/_2`, `CCP_11_1`).
+    `HUDTerminal.GetInstanceId(name)` returns the handle: 201 or 202 (its proxy records: 200 CreateInstance in the run at
+    0xca26f4; 201/202 only elsewhere, at 0x2d7xxx). It also has a separate HUD terminal connection, used only with
+    `FPK_PLUS_HUD` coded (display selection FPK / HUD / FPK+HUD): a windscreen HUD is probably its own HUDTerminal 82/02.
+  - **Name probes** (`probeNames`, only when "HUD debug log" is switched on): 201 and 202 with `[0000][01][name][00]` for five names,
+    to 82/00 and, if the registry has it, 82/02; the answers are logged, nothing is decided from them yet. The leading 0000 keeps it
+    harmless if one of the numbers is ReleaseInstance.
 - **Picture box**: the shapes are drawn in the 6WA box (70,20)-(170,120). On a MINI (its layout present) every point is mapped to
   (35,15)-(85,65), where the F54 cluster's own navigation draws (captured in the car). `hud_box_6wa` keeps the 6WA box; `hud_mono`
   draws everything in the route colour.

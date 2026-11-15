@@ -103,6 +103,7 @@ char *g_cli;
 volatile int g_attached, g_registered, g_lock;
 volatile u32 g_client;
 volatile u16 g_self, g_host, g_amHost;    // g_amHost: owner of AudioMaster 20/00 ("Media gestures", volume)
+volatile u16 g_host2;                     // HUDTerminal 82/02 (a BMW windscreen HUD's own terminal, if the registry has one)
 volatile u32 g_navMs, g_answers, g_sent;  // last command of another client to 0x82 (BMW navigation), answers from the cluster
 // the layout probe (detectLayout): ImageGetSize answered for handle 5 (the 6WA picture) / 0x1F (the 6WB plane); the BMW navigation
 // seen drawing on a 6WB handle (0x18..0x35)
@@ -297,6 +298,8 @@ void onData(void *, void *is) {
       u16 key = rd16(p + 4 + i * 4 + 2);
       if (key == ((kFBlock << 8) | kInst) && !host)
         host = rd16(p + 4 + i * 4);
+      if (key == ((kFBlock << 8) | 2) && !g_host2)
+        g_host2 = rd16(p + 4 + i * 4);
       if (key == ((kAudioMaster << 8) | 0) && !am)
         am = rd16(p + 4 + i * 4);
     }
@@ -627,7 +630,17 @@ bool polygon(u16 h, u16 idx, const Pt *p, u32 k, bool whole = false) {
     be16(d + 6 + 4 * i, (u16)q[i].x);
     be16(d + 8 + 4 * i, (u16)q[i].y);
   }
-  return call(kAddPolygon, d, 6 + 4 * k);
+  if (!g_6wb || k + 1 > kPolyPts)
+    return call(kAddPolygon, d, 6 + 4 * k);
+  // 6WB: the navigation set its plane up itself (fill mode, line colour) and its own look is outlines; JayJay saw polylines
+  // (type 2, line width 6) there. So the polygon goes as filled and again as a closed outline (item idx + 0x100).
+  call(kAddPolygon, d, 6 + 4 * k);
+  be16(d + 2, (u16)(idx + 0x100));
+  d[4] = 2;
+  d[5] = (u8)(k + 1);
+  be16(d + 6 + 4 * k, (u16)q[0].x);
+  be16(d + 8 + 4 * k, (u16)q[0].y);
+  return call(kAddPolygon, d, 6 + 4 * (k + 1));
 }
 
 // Maneuver pictures: hudshapes.h (all 54 iAP2 / CPManeuverType types, junction side roads).
@@ -858,7 +871,7 @@ void drawPicture(u16 buf, const Guide &g, u32 level, bool high) {
     applyFill(s, level);
   addLanes(s, g.lanes, g.nl, g.side == 1);  // the iPhone's lanes under the arrow, while it shows them
   callH(kRemoveAll, buf);
-  callHB(kSetLineWidth, buf, 0);
+  callHB(kSetLineWidth, buf, g_6wb ? 6 : 0);  // 6WB: the outlines (polygon); JayJay: 6 looks right, 0x16 far too thick
   callHB(kSetFillColor, buf, kFill);  // as the BMW navigation does
   u32 tone = 0;
   if (g_concave) {  // whole polygons (always, unless the test switch hud_convex)
@@ -989,6 +1002,36 @@ bool kombiOnly() {
   return b[0] == 'k';
 }
 
+// The BMW navigation creates its instances by name (its CIcHudComm_TF1_3 "Old IC" and CIcHudComm_TF11_13 "FPK" back-ends, names
+// read from NavNBTEvoController 006), and HUDTerminal.GetInstanceId(name) answers the handle on any cluster. Its function number
+// is 201 or 202 (not proven): with "HUD debug log" on, both are asked for a few names on 82/00 and on 82/02 (a windscreen HUD's own
+// terminal), and the answers land in the log. Every probe starts with handle 0000, so if the number is ReleaseInstance instead, it
+// can only hit a handle that does not exist. Nothing is decided from the answers yet.
+void probeNames() {
+  static const char *const names[] = { "TopFrame", "1.GuidingIcon", "Top_Frame_11", "Guiding_Arrow_11_1", "Bargraph_11_1" };
+  u16 hosts[2] = { g_host, g_host2 };
+  for (int t = 0; t < 2; t++) {
+    if (!hosts[t])
+      continue;
+    for (u32 n = 0; n < sizeof names / sizeof names[0]; n++)
+      for (u16 fkt = 0x201; fkt <= 0x202; fkt++) {
+        u8 d[40];
+        u32 k = 0;
+        d[k++] = 0;
+        d[k++] = 0;   // handle 0000
+        d[k++] = 1;   // ISO-8859-15
+        for (const char *c = names[n]; *c && k < sizeof d - 1; c++)
+          d[k++] = (u8)*c;
+        d[k++] = 0;
+        noteSent(fkt, d, k);
+        dbgLine(t ? "out 82/02" : "out ", fkt, kOpStartResultAck, d, k);
+        send(hosts[t], kFBlock, (u8)(t ? 2 : 0), fkt, kOpStartResultAck, d, k);
+        usleep(20000);
+      }
+  }
+  logf1("CarPlayMenu: HUD: name probes sent (GetInstanceId 201/202) to 82/00 at %04x and 82/02 at %04x", g_host, g_host2);
+}
+
 void use6wb(const char *why) {
   hFrame = 0x17;
   hStreet = 0x1a;
@@ -1066,6 +1109,8 @@ void *worker(void *) {
         close(f);
       if (on && !g_hudDebug) {
         g_dbg = 0;  // the next 600 HUDTerminal lines go to the log
+        g_hudDebug = on;
+        probeNames();
         char m[200];
         snprintf(m, sizeof m, "CarPlayMenu: HUD: debug log on: layout %s, HUDTerminal at %04x, %u calls sent, %u answered, size 0x1f %u / 5 %u",
                  g_6wb ? "6WB" : g_boxMini ? "6WA (MINI box)" : "6WA", g_host, g_sent, g_answers, g_size1f, g_size5);
