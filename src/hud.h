@@ -390,6 +390,9 @@ enum {
 // arrow there was visible while ours in the 6WA box was not (text was). On a MINI (its layout package is present) every point is mapped
 // to (35,15)-(85,65); the file hud_box_6wa in the settings folder keeps the 6WA box.
 bool g_boxMini;
+int g_bx0 = 35, g_by0 = 15, g_bx1 = 85, g_by1 = 65;  // picture-box target (the 6WA shapes are mapped into it); overridable by the hud_box switch
+int g_hide[8];
+int g_nHide = 0;  // handles to SetVisibility-off on each guidance draw (the hud_hide switch): for a surface the cluster shows itself over other content (e.g. a distance bar on the speed)
 u8 g_fillDim = 3;  // the context tone: grey (F54; 0x0A, the first choice, is transparent there); hud_mono draws everything in kFill
 // Test switches (files in the settings folder, read when the HUD starts; all off by default, the drawing without them is unchanged):
 //   hud_convex   the convex pieces of before instead of whole polygons. Whole polygons (hudshapes.h mergePieces, a few calls a picture
@@ -436,6 +439,57 @@ bool readSwitch(const char *name, u32 *a, u32 *b) {
   }
   return true;
 }
+// the hud_box switch: four numbers "x0 y0 x1 y1" -> the picture box (the 6WA shapes mapped into it). Needs all four.
+bool readBox(const char *name, int *b) {
+  char path[96];
+  snprintf(path, sizeof path, "/var/opt/hmi/data/rw/carplaymenu/%s", name);
+  int fd = open(path, 0);
+  if (fd < 0)
+    return false;
+  char t[32];
+  long n = read(fd, t, sizeof t - 1);
+  close(fd);
+  if (n < 0)
+    n = 0;
+  t[n] = 0;
+  u32 k = 0;
+  for (char *q = t; *q && k < 4;) {
+    if (*q >= '0' && *q <= '9') {
+      int v = 0;
+      while (*q >= '0' && *q <= '9')
+        v = v * 10 + (*q++ - '0');
+      b[k++] = v;
+    } else
+      q++;
+  }
+  return k == 4;
+}
+// the hud_hide switch: handle numbers (decimal) to SetVisibility-off on every guidance draw, for surfaces the cluster draws itself
+// over other content (e.g. a distance bar on the speed). Up to 8; a cluster whose instances differ leaves the switch empty.
+void readHide() {
+  g_nHide = 0;
+  char path[96];
+  snprintf(path, sizeof path, "/var/opt/hmi/data/rw/carplaymenu/hud_hide");
+  int fd = open(path, 0);
+  if (fd < 0)
+    return;
+  char t[64];
+  long n = read(fd, t, sizeof t - 1);
+  close(fd);
+  if (n < 0)
+    n = 0;
+  t[n] = 0;
+  for (char *q = t; *q && g_nHide < 8;) {
+    if (*q >= '0' && *q <= '9') {
+      int v = 0;
+      while (*q >= '0' && *q <= '9')
+        v = v * 10 + (*q++ - '0');
+      if (v > 0)
+        g_hide[g_nHide++] = v;
+    } else
+      q++;
+  }
+}
 void chooseBox() {
   int mono = open("/var/opt/hmi/data/rw/carplaymenu/hud_mono", 0);
   if (mono >= 0) {
@@ -465,8 +519,28 @@ void chooseBox() {
     close(o);
     g_boxMini = false;
   }
-  if (g_log)
-    g_log(g_boxMini ? "CarPlayMenu: HUD: picture box MINI (35,15)-(85,65)" : "CarPlayMenu: HUD: picture box 6WA (70,20)-(170,120)");
+  int bx[4];
+  if (readBox("hud_box", bx) && bx[2] > bx[0] && bx[3] > bx[1]) {
+    g_bx0 = bx[0];
+    g_by0 = bx[1];
+    g_bx1 = bx[2];
+    g_by1 = bx[3];
+    g_boxMini = true;  // map the shapes into hud_box's box: for a cluster whose picture buffer is not the F20's 199x129 (e.g. F30 126x77)
+  }
+  if (g_log) {
+    if (g_boxMini) {
+      char m[72];
+      snprintf(m, sizeof m, "CarPlayMenu: HUD: picture box (%d,%d)-(%d,%d)", g_bx0, g_by0, g_bx1, g_by1);
+      g_log(m);
+    } else
+      g_log("CarPlayMenu: HUD: picture box 6WA (70,20)-(170,120)");
+  }
+  readHide();
+  if (g_nHide && g_log) {
+    char m[64];
+    snprintf(m, sizeof m, "CarPlayMenu: HUD: hud_hide: %d handle(s) hidden each draw", g_nHide);
+    g_log(m);
+  }
 }
 enum {
   hFrame = 1,
@@ -579,7 +653,7 @@ bool polygon(u16 h, u16 idx, const Pt *p, u32 k, bool whole = false) {
   for (u32 i = 0; i < k; i++)
     q[i] = p[i];
   if (g_boxMini) {
-    k = whole ? toMiniPoly(q, k) : toMini(q, k);
+    k = whole ? toMiniPoly(q, k, g_bx0, g_by0, g_bx1, g_by1) : toMini(q, k, g_bx0, g_by0, g_bx1, g_by1);
     if (k < 3)
       return true;
   }  // half size, the MINI cluster's picture area
@@ -862,6 +936,8 @@ void drawManeuver(const Guide &g, const char *dn, const char *du, u32 level = 0)
   setText(hDist, dn);
   setText(hUnit, du);
   callHB(kSetVisibility, hFrame, 1);
+  for (int i = 0; i < g_nHide; i++)
+    callHB(kSetVisibility, (u16)g_hide[i], 0);  // hud_hide: hide surfaces the cluster shows itself (e.g. a distance bar it puts over the speed)
   g_shown = true;
 }
 void drawClear() {  // the state the BMW navigation leaves the terminal in at the end of a route

@@ -112,10 +112,10 @@ inline u32 hull(Pt *p, u32 k) {
 }
 // a piece in the MINI cluster's picture area: the box at half size, at (35,15)-(85,65). Halving to whole pixels can dent a piece or fold
 // it flat, so the hull is taken again; fewer than 3 points left = nothing to draw.
-inline u32 toMini(Pt *p, u32 k) {
+inline u32 toMini(Pt *p, u32 k, int x0, int y0, int x1, int y1) {
   for (u32 i = 0; i < k; i++) {
-    p[i].x = (s16)(35 + ((p[i].x - 70) >> 1));
-    p[i].y = (s16)(15 + ((p[i].y - 20) >> 1));
+    p[i].x = (s16)(x0 + (p[i].x - 70) * (x1 - x0) / 100);
+    p[i].y = (s16)(y0 + (p[i].y - 20) * (y1 - y0) / 100);
   }
   return hull(p, k);
 }
@@ -953,10 +953,10 @@ inline void mergePieces(const Shape &s, Polys &m) {
   }
 }
 // a whole polygon in the MINI cluster's picture area (as toMini, without the hull: the polygon need not be convex)
-inline u32 toMiniPoly(Pt *p, u32 k) {
+inline u32 toMiniPoly(Pt *p, u32 k, int x0, int y0, int x1, int y1) {
   for (u32 i = 0; i < k; i++) {
-    p[i].x = (s16)(35 + ((p[i].x - 70) >> 1));
-    p[i].y = (s16)(15 + ((p[i].y - 20) >> 1));
+    p[i].x = (s16)(x0 + (p[i].x - 70) * (x1 - x0) / 100);
+    p[i].y = (s16)(y0 + (p[i].y - 20) * (y1 - y0) / 100);
   }
   return tidy(p, k);
 }
