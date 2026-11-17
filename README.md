@@ -63,11 +63,11 @@ instead (not tried on iDrive 6 in a car).
 The plugin reads the guidance the iPhone sends to the car (the maneuver, the distance, the street, the lanes) and shows it where the
 BMW navigation would. How it gets there depends on the car's cluster; the installer finds out which one the car has.
 
-| | F-series (MOST cluster, e.g. MINI F54/F55/F56) | G-series and J29 (Ethernet KOMBI) |
+| | F-series (MOST cluster, e.g. MINI F54/F55/F56, BMW F30/F31 digital cluster) | G-series and J29 (Ethernet KOMBI) |
 |---|---|---|
 | Who draws | **We do.** The plugin draws every picture itself, polygon by polygon, on the cluster's `HUDTerminal` over MOST. | **The car does.** The plugin sends the route data to the KOMBI's own guidance service (SOME/IP), and the cluster and the HUD draw it with their own graphics. |
 | Pictures | Mapbox's maneuver and lane drawings, turned into HUD polygons (previews below). | The car's own arrows, distance and lane row. |
-| Status | **Tested in a car** (MINI F54, HMI 1703): pictures, distance, street, HUD effects, lanes. | **Not tested in a car.** A port of NBT-AAD's car-verified KOMBI stack (see Credits), checked against a fake KOMBI only. |
+| Status | **Tested in a car.** MINI F54 (HMI 1703): pictures, distance, street, HUD effects, lanes. BMW F30/F31 digital cluster (NBT Evo ID5): arrow and distance — its picture buffer is 126×77 and it paints its own distance bar, both unlike the F54, so it needs the `hud_box` / `hud_hide` switches (see AGENTS.md). | **Not tested in a car.** A port of NBT-AAD's car-verified KOMBI stack (see Credits), checked against a fake KOMBI only. |
 
 **HUD effects** (MOST, menu *HUD effects*): the maneuver fills up with the effect colour toward the turn and / or blinks near it. The
 start marker never fills or blinks.
