@@ -63,16 +63,16 @@ instead (not tried on iDrive 6 in a car).
 The plugin reads the guidance the iPhone sends to the car (the maneuver, the distance, the street, the lanes) and shows it where the
 BMW navigation would. How it gets there depends on the car's cluster; the installer finds out which one the car has.
 
-| | F-series (MOST cluster, e.g. MINI F54/F55/F56) | G-series and J29 (Ethernet KOMBI) |
+| | F-series (MOST cluster, e.g. MINI F54/F55/F56, BMW F30/F31 digital cluster) | G-series and J29 (Ethernet KOMBI) |
 |---|---|---|
 | Who draws | **We do.** The plugin draws every picture itself, polygon by polygon, on the cluster's `HUDTerminal` over MOST. | **The car does.** The plugin sends the route data to the KOMBI's own guidance service (SOME/IP), and the cluster and the HUD draw it with their own graphics. |
 | Pictures | Mapbox's maneuver and lane drawings, turned into HUD polygons (previews below). | The car's own arrows, distance and lane row. |
-| Status | **Tested in a car** (MINI F54, HMI 1703): pictures, distance, street, HUD effects, lanes. | **Not tested in a car.** A port of NBT-AAD's car-verified KOMBI stack (see Credits), checked against a fake KOMBI only. |
+| Status | **Tested in a car.** MINI F54 (HMI 1703): pictures, distance, street, HUD effects, lanes. BMW F30/F31 digital cluster (NBT Evo ID5, PR #13): arrow and distance with the `hud_box` / `hud_hide` switches set by hand (its picture buffer is 126×77 and it shows its own distance bar); the plugin now fits the box and hides the bar itself (not yet tried there). | **Not tested in a car.** A port of NBT-AAD's car-verified KOMBI stack (see Credits), checked against a fake KOMBI only. |
 
 **On the MOST cluster** the plugin takes the cluster's own handles from the BMW navigation's set-up at start (they differ between
 clusters: an F25 X3 has its texts elsewhere than a MINI), asks the cluster how big its picture area is and fits the arrow into it,
 and also draws on a second HUDTerminal (82/02) when the navigation uses one. Distances keep their decimal point ("1.5 km"). Seen in
-a car so far only on the MINI F54; for other clusters the settings files `hud_box`, `hud_hide`, `hud_inst` and `hud_text_handles`
+a car so far only on the MINI F54 (the F30/F31 and F25 worked with the same settings made by hand); for other clusters the settings files `hud_box`, `hud_hide`, `hud_inst` and `hud_text_handles`
 (AGENTS.md) set things by hand, and `sh carplay-advanced.sh hud-probe` shows what the cluster has.
 
 **On the KOMBI** the street is shortened to 22 characters (the windscreen HUD cuts longer names off), a highway exit shows its
