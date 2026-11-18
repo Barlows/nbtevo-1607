@@ -1,7 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-# Installer for the "CarPlay Advanced Settings" HMI plugin (plugin/) on the NBT Evo, iDrive 5/6, HMI 006_017_006 or
-# ID5_1703-490-1650ZD Build 139 (the plugin picks its addresses by build; Full-screen CarPlay is 006_017_006 only).
+# Installer for the "CarPlay Advanced Settings" HMI plugin (plugin/) on the NBT Evo, iDrive 5/6, HMI 006_017_006,
+# ID5_1703-490-1650ZD Build 139 or ID5_1607-490-1610T Build 153 (the plugin picks its addresses by build; no Full-screen CarPlay on
+# 1607).
 #
 # Run it from a computer (macOS or Linux, POSIX sh + OpenSSH), in the folder with plugin/:
 #     sh carplay-advanced.sh install [--host root@169.254.199.99] [--dry-run] [--restart-hmi]
@@ -118,6 +119,10 @@ ID5_1803-510-1749MA_Build_71     scan                edb7d483662c456de791a460e18
 ID5_1703-490-1650ZD_Build_139    HmiMain3D           81343a9349384b790f40510bc6ca6b89aa5efb6d3253fad0e590f296b5e348fb
 ID5_1703-490-1650ZD_Build_139    libconn_carplay.so  062a20f49fc4f4bab1a7e3b9a5910d12ba8e6b70895a434291c20d83ee0a5f85
 ID5_1703-490-1650ZD_Build_139    scan                28f623d87c3c934d058fb49b1d2b5f04cbfa76f574f2dbcf78814b5276acde6c
+ID5_1607-490-1610T_Build_153     HmiMain3D           0fa0e6e0de49235c02a8bcebca588dad18bd5eab512066ab44ed295a09ca3fbd
+ID5_1607-490-1610T_Build_153     libconn_carplay.so  bbdbae7df387c448a3eec9dd607f9e7b196b899039a0123e6299d5ad0fa96827
+ID5_1607-490-1610T_Build_153     scan                none
+ID5_1607-490-1610T_Build_153     fullscreen          none
 EOF
 }
 # supported_as <sha256 of HmiMain3D> <sha256 of libconn_carplay.so>: prints the matching software, nothing if none
@@ -137,7 +142,8 @@ EOF
             case "$file" in
                 HmiMain3D) [ "$sum" = "$1" ] || match=0 ;;
                 libconn_carplay.so) [ "$sum" = "$2" ] || match=0 ;;
-                scan) ;;                                       # the expected HMI scan (checked separately)
+                scan) ;;                                       # the expected HMI scan (checked separately); none = mapped by hand
+                fullscreen) ;;                                 # none = no Full-screen CarPlay on this build (the plugin's pbw 0)
                 *) match=0 ;;
             esac
         done <<EOF
@@ -151,7 +157,8 @@ EOF
 # reported as untested. sha256 and where it was seen:
 mmipod_table() {
     cat <<'EOF'
-d3f7c8973feff37d512ba92baf42d40ce8a2626fe38fdf17e7da10db320bb36f  ID5_1703-490-1650ZD_Build_139 ID5_1803-510-1749MA_Build_71
+d3f7c8973feff37d512ba92baf42d40ce8a2626fe38fdf17e7da10db320bb36f  ID5_1703-490-1650ZD_Build_139 ID5_1803-510-1749MA_Build_71 ID5_1903-490-1837J_Build_41
+5dd2351bb0d8102c0b591fe0b91403e2593a8e9786ab4bfd2b7448b0e1417b25  ID5_1607-490-1610T_Build_153
 EOF
 }
 mmipod_known() {    # mmipod_known <sha256>: the builds that have this mm-ipod, or nothing
@@ -751,7 +758,14 @@ EOF
             ok 'The head unit is restarting; it is back in about a minute.'
             return 0
         fi
-        if kill -0 "$rb_pid" 2>/dev/null; then kill "$rb_pid" 2>/dev/null || :; die "The head unit did not confirm the restart in $REBOOT_CONFIRM_S s."; fi
+        if kill -0 "$rb_pid" 2>/dev/null; then
+            # no word in time: what ran before (an install, an uninstall) is complete, so a note and exit 3, not an error
+            kill "$rb_pid" 2>/dev/null || :
+            sed -n "$((rb_shown + 1)),\$p" "$rb_out" | show_remote
+            note "The head unit did not confirm the restart in $REBOOT_CONFIRM_S s. What was installed is complete: restart the head unit by"
+            note 'hand (ignition off and on), or run: sh carplay-advanced.sh restart'
+            return 3
+        fi
         rb_rc=0; wait "$rb_pid" || rb_rc=$?
         sed -n "$((rb_shown + 1)),\$p" "$rb_out" | show_remote
         # 255: the connection dropped, which is how a reboot usually ends it
@@ -777,7 +791,7 @@ EOF
         sum=$(grep -v -e '^hmi ' -e '^#' "$1" | $SHA256) || return 1
         echo "${sum%% *}"
     }
-    known_scan() {    # known_scan <software>: its expected scan hash
+    known_scan() {    # known_scan <software>: its expected scan hash ("none": mapped by hand, the scan's patterns do not cover it)
         supported_table | while read -r k_name k_file k_sum; do
             if [ "$k_name" = "$1" ] && [ "$k_file" = scan ]; then echo "$k_sum"; fi
         done
@@ -872,7 +886,12 @@ Installer: $VERSION"
             if [ -n "$SOFTWARE" ]; then
                 ok "Supported software: $SOFTWARE (HmiMain3D and libconn_carplay.so match by hash)"
                 want=$(known_scan "$SOFTWARE")
-                if [ "$scan_ok" -eq 1 ] && [ -n "$want" ] && [ "$(scan_hash "$WORK/build.tab")" = "$want" ]; then
+                if supported_table | grep "^$SOFTWARE  *fullscreen  *none\$" >/dev/null 2>&1; then
+                    note "$SOFTWARE has no Full-screen CarPlay yet (its layouts are an older format): that option stays off."
+                fi
+                if [ "$want" = none ]; then
+                    ok "$SOFTWARE was mapped by hand (the HMI scan's patterns do not cover it); the install uses the built-in table."
+                elif [ "$scan_ok" -eq 1 ] && [ -n "$want" ] && [ "$(scan_hash "$WORK/build.tab")" = "$want" ]; then
                     ok 'The HMI scan finds the same addresses as the built-in table.'
                 else
                     note "The HMI scan does not agree with the built-in table for $SOFTWARE ($(cat "$WORK/scan.err" 2>/dev/null || :)); the install uses the built-in table. Please report this."
@@ -998,7 +1017,14 @@ Installer: $VERSION"
         cluster_line=$(grep -E '^  (most|kombi|both): ' "$WORK/out" | sed -n 1p | sed -e 's/^  [a-z]*: //' -e 's/\.$//')
         if [ "$ACTION" = install ]; then
             step "${C_G}Done: CarPlay Advanced Settings is installed${C_N}"
-            row 'Head unit' "$gen, ${hmi_version:-unknown}$(case "$SOFTWARE" in '') ;; scanned) echo ' (not yet supported: addresses from the HMI scan)' ;; *) echo ' (supported, checked by hash)' ;; esac)"
+            # no case inside $(...): macOS /bin/sh (bash 3.2) misreads its ")" patterns there (issue #9)
+            sw_label=
+            case "$SOFTWARE" in
+                '') ;;
+                scanned) sw_label=' (not yet supported: addresses from the HMI scan)' ;;
+                *) sw_label=' (supported, checked by hash)' ;;
+            esac
+            row 'Head unit' "$gen, ${hmi_version:-unknown}$sw_label"
             if [ "$MODE" = full ]; then
                 row 'Installed' "the full plugin: menu, HMI patches, full-screen CarPlay, knob and touchpad, HUD directions"
             else
@@ -1153,28 +1179,31 @@ link_state() {
 
 # ---------------------------------------------------------------------------------------------------------------- hud-probe
 # What the cluster and the HUD have, asked through the plugin (only it has a MOST client): its test channel (one HUDTerminal call per
-# line, hud.h runCmds) and "HUD debug log" (hud_debug: the plugin logs every HUDTerminal message and sends its GetInstanceId name
-# probes to 82/00 and 82/02). Nothing is installed; hud_debug is put back as it was. The answers are read from the plugin log.
+# line, hud.h runCmds) and "HUD debug log" (hud_debug: the plugin logs every HUDTerminal message, its terminals and its handles).
+# Nothing is installed; hud_debug is put back as it was. The answers are read from the plugin log: /dev/shmem/carplaymenu.log, or in
+# a HUD-only install (the HUD runs in mm-ipod, during a CarPlay connection) /var/iap/rghook.log.
 hud_probe() {
     HP_LOG=$SHMEM/carplaymenu.log
+    [ -f "$PLUGIN/hud_only" ] && HP_LOG=${RGHOOK_LOG:-/var/iap/rghook.log}
     HP_CMD=$SHMEM/carplaymenu-hudcmd
     HP_DBG=$SETTINGS/hud_debug
     say "CarPlay Advanced Settings installer $VERSION; hud-probe"
     say "HMI: ${hmi_build:-unknown}"
     say "Plugin: $(if [ -d "$PLUGIN" ]; then echo "installed$([ -f "$PLUGIN/hud_only" ] && echo ' (HUD-only menu: the drawing runs in mm-ipod, during a CarPlay connection)')"; else echo 'not installed'; fi)"
-    for f in hud_guidance hud_debug hud_layout cluster; do
+    for f in hud_guidance hud_debug hud_layout hud_inst hud_box hud_box_6wa hud_hide hud_text_handles hud_comma hud_colour_day \
+        hud_handles hud_handles_2 cluster; do
         if [ -f "$SETTINGS/$f" ]; then say "  switch $f: on$(v=; read -r v < "$SETTINGS/$f" 2>/dev/null; [ -n "$v" ] && echo " ($v)")"; else say "  switch $f: off"; fi
     done
     say "HmiMain3D PID(s): $(one_line "$(pids_of HmiMain3D)")"
     say "mm-ipod PID(s): $(one_line "$(pids_of mm-ipod)")"
     [ -d "$PLUGIN" ] && [ -d "$SETTINGS" ] || { say 'Nothing to ask: install the plugin (with "CarPlay directions in HUD" on) first.'; return 1; }
     [ -f "$HP_LOG" ] || { say "No plugin log ($HP_LOG): the plugin has not started since the last boot."; return 1; }
-    say '--- what the plugin found at its start (MOST client, registry, layout) ---'
-    grep -e 'HUD: MOST' -e 'HUD: registry' -e 'HUDTerminal 82' -e 'HUD: layout probe' -e 'HUD: cluster layout' -e 'HUD: picture box' \
-        -e 'HUD: other client' "$HP_LOG" | sed -n 1,30p
+    say '--- what the plugin found at its start (MOST client, registry, handles from the set-up, layout, picture box) ---'
+    grep -e 'HUD: MOST' -e 'HUD: registry' -e 'HUDTerminal 82' -e 'HUD: layout probe' -e 'HUD: cluster layout' -e 'HUD: picture' \
+        -e 'HUD: handles' -e 'HUD: copies' -e 'HUD: other client' -e 'HUD: texts on' -e 'HUD: day' -e 'HUD: night' "$HP_LOG" | sed -n 1,40p
     [ ! -f "$HP_CMD" ] || { say "The test channel is busy ($HP_CMD); try again in a minute."; return 1; }
     hp_start=$(count_lines "$HP_LOG")
-    # 1. name probes: "HUD debug log" switched on (off and on again if it was on) makes the plugin send them, to 82/00 and 82/02
+    # 1. "HUD debug log" switched on (off and on again if it was on): the plugin logs its terminals and handles, then every message
     HP_WAS=0
     [ -f "$HP_DBG" ] && HP_WAS=1
     if [ "$HP_WAS" -eq 1 ]; then rm -f "$HP_DBG"; sleep "$HUD_PROBE_WAIT"; fi
@@ -1200,7 +1229,7 @@ c04 00${hp_h}01
     sed -n "$((hp_start + 1)),\$p" "$HP_LOG" > "$SHMEM/carplaymenu-hudprobe.txt" 2>/dev/null || :
     HP_OUT=$SHMEM/carplaymenu-hudprobe.txt
     say '--- the plugin during the probe ---'
-    grep -e 'HUD: debug log' -e 'name probes' -e 'HUD: cluster layout' "$HP_OUT" | sed -n 1,10p
+    grep -e 'HUD: debug log' -e 'HUD: handles' -e "HUD: copies' handles" -e 'HUD: cluster layout' "$HP_OUT" | sed -n 1,10p
     if [ "$hp_taken" -eq 0 ]; then
         say "The plugin's HUD did not take the test channel: is \"CarPlay directions in HUD\" on and the HMI running (HUD-only menu:"
         say 'a CarPlay connection running)? Nothing was asked.'
@@ -1218,8 +1247,8 @@ c04 00${hp_h}01
         hp_n=$((hp_n + 1))
     done < "$HP_OUT"
     [ "$hp_n" -gt 0 ] || say '  none answered with a size'
-    say '--- the instance names (GetInstanceId 201 / 202) and every other answer to them ---'
-    grep -e 'fkt 201' -e 'fkt 202' "$HP_OUT" | grep -v 'HUD out' | sed -n 1,40p
+    say "--- the navigation's set-up seen during the probe (CreateInstance 200 / FrameAddItem 22b answers) ---"
+    grep -e 'fkt 200 op d' -e 'fkt 22b op d' "$HP_OUT" | sed -n 1,40p
     say '--- errors from the terminal during the probe (op 9 / f: [code][parameter]) ---'
     grep -e ' op 9 ' -e ' op f ' "$HP_OUT" | grep -v 'fkt c04' | sed -n 1,20p
     say "--- (all $(count_lines "$HP_OUT") log lines of the probe are in $HP_OUT on the head unit) ---"
@@ -1741,17 +1770,24 @@ if [ "$ACTION" = install ]; then
     say 'Plugin files staged and compared with the originals.'
 fi
 
-# id6: the route-guidance wrapper the menu plugin would build at runtime (there is no menu plugin on id6). The original mm-ipod is copied
-# in so the wrapper can exec it (the shadow link would otherwise point at the wrapper itself); the switch turns boot.sh's relink on.
-# Staged like the plugin so the same transaction / rollback covers it (staged-settings -> $SETTINGS on commit).
+# HUD-only (the default on iDrive 6): the route-guidance wrapper the menu plugin would build at runtime (the HUD-only menu does not).
+# The original mm-ipod is copied in so the wrapper can exec it (the shadow link would otherwise point at the wrapper itself); the
+# switch turns boot.sh's relink on. Staged like the plugin so the same transaction / rollback covers it (staged-settings -> $SETTINGS
+# on commit). A second HUD-only install on top of one finds mm-ipod as the plugin's link to the wrapper: the wrapper then gets the
+# original kept in $ORIG by the first install (compared above).
 if [ "$ACTION" = install ] && [ "$MODE" = hud ]; then
-    [ -f "$MMIPOD" ] && [ ! -L "$MMIPOD" ] || die "$MMIPOD is missing or already a link: cannot copy the original mm-ipod for the wrapper."
+    MM_SRC=$MMIPOD
+    if [ -L "$MMIPOD" ] && [ -f "$ORIG/mm-ipod" ] && [ ! -L "$ORIG/mm-ipod" ]; then
+        MM_SRC=$ORIG/mm-ipod
+        say "$MMIPOD is the link of an earlier install: the wrapper gets the kept original ($ORIG/mm-ipod)."
+    fi
+    [ -f "$MM_SRC" ] && [ ! -L "$MM_SRC" ] || die "$MMIPOD is missing or already a link: cannot copy the original mm-ipod for the wrapper."
     mkdir -p "$BACKUP/staged-settings/bin"
-    copy_verified "$MMIPOD" "$BACKUP/staged-settings/bin/mm-ipod"
+    copy_verified "$MM_SRC" "$BACKUP/staged-settings/bin/mm-ipod"
     chmod 755 "$BACKUP/staged-settings/bin/mm-ipod"
     cat > "$BACKUP/staged-settings/mm-ipod" <<'WRAP'
 #!/bin/ksh
-# CarPlayMenu: route guidance: mm-ipod with librghook.so (installed by carplay-advanced.sh for iDrive 6)
+# CarPlayMenu: route guidance: mm-ipod with librghook.so (installed by carplay-advanced.sh, HUD-only)
 R=/var/opt/hmi/data/rw; [ -d $R ] || R=/fs/sda1/opt/hmi/data/ID5
 mkdir -p /var/iap/pps
 export LD_PRELOAD=$R/Plugins/CarPlayMenu/librghook.so${LD_PRELOAD:+:$LD_PRELOAD}
@@ -1761,7 +1797,7 @@ WRAP
     chmod 755 "$BACKUP/staged-settings/mm-ipod"
     : > "$BACKUP/staged-settings/hud_guidance"
     chmod 755 "$BACKUP/staged-settings"
-    say 'Route-guidance wrapper (mm-ipod + librghook) staged for iDrive 6.'
+    say 'Route-guidance wrapper (mm-ipod + librghook) staged.'
 fi
 
 NEW_SS=

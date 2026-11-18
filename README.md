@@ -69,6 +69,15 @@ BMW navigation would. How it gets there depends on the car's cluster; the instal
 | Pictures | Mapbox's maneuver and lane drawings, turned into HUD polygons (previews below). | The car's own arrows, distance and lane row. |
 | Status | **Tested in a car** (MINI F54, HMI 1703): pictures, distance, street, HUD effects, lanes. | **Not tested in a car.** A port of NBT-AAD's car-verified KOMBI stack (see Credits), checked against a fake KOMBI only. |
 
+**On the MOST cluster** the plugin takes the cluster's own handles from the BMW navigation's set-up at start (they differ between
+clusters: an F25 X3 has its texts elsewhere than a MINI), asks the cluster how big its picture area is and fits the arrow into it,
+and also draws on a second HUDTerminal (82/02) when the navigation uses one. Distances keep their decimal point ("1.5 km"). Seen in
+a car so far only on the MINI F54; for other clusters the settings files `hud_box`, `hud_hide`, `hud_inst` and `hud_text_handles`
+(AGENTS.md) set things by hand, and `sh carplay-advanced.sh hud-probe` shows what the cluster has.
+
+**On the KOMBI** the street is shortened to 22 characters (the windscreen HUD cuts longer names off), a highway exit shows its
+number ("Exit 23B  I-95 N"), and a maneuver without a distance shows "0 m".
+
 **HUD effects** (MOST, menu *HUD effects*): the maneuver fills up with the effect colour toward the turn and / or blinks near it. The
 start marker never fills or blinks.
 
@@ -90,6 +99,7 @@ hashes:
 |---|---|---|
 | 006_006_006 | ID5_1703-490-1650ZD Build 139 (MINI F54, 8.8") | tested in a car |
 | 006_017_006 | ID5_1803-510-1749MA Build 71 | not tried in a car yet |
+| NBTevo_ID5_1607_Release | ID5_1607-490-1610T Build 153 (BMW F20) | mapped by a contributor from a car's HMI; no Full-screen CarPlay; not tried in a car yet |
 
 Before it changes anything, the installer reads the head unit's HMI and CarPlay library and compares their hashes with the list
 above. On other iDrive 5 software it **searches the HMI for the places the plugin uses** (about 20 s on your computer). If it finds

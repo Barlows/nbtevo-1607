@@ -11,6 +11,14 @@
 //     The navigation creates the instances, so they differ per cluster: the BMW F-series multifunction cluster ("6WB") has 0x17 the
 //     area, 0x1A/0x1B/0x1C the texts and 0x1F/0x20 a perspective plane of 221 x 158 (JayJay3071/nbt-android-auto, docs/
 //     CLUSTER-HUDTERMINAL.md, verified there on an old NBT). Which one this car has is asked with ImageGetSize (detectLayout).
+//   * set-up (initTerminal), the way the cluster firmware and the navigation's own set-up show it (MINIHU docs/HUD_TERMINAL_REFERENCES.md
+//     "The whole picture", docs/CLUSTER_FIRMWARE.md): the cluster gives out the handles when the navigation creates its instances by
+//     name (200 CreateInstance) and puts them into frames (22B FrameAddItem). Their answers pass this client too: hudhandles.h reads
+//     the roles from them, per terminal, and the map is kept in the settings folder (hud_handles, hud_handles_2) for the next start
+//     and for the sender in mm-ipod. Then the picture buffer's size is asked (C04 ImageGetSize) and the picture box fitted to it.
+//   * terminals: 82/00 is drawn on (the HUD on the MINI F54; "FB_HUD_Terminal_hud" in its firmware); 82/02 ("FB_HUD_Terminal_kombi",
+//     on clusters with a navigation area of their own, and a windscreen HUD's on some BMWs) gets a copy of every drawing call, with its
+//     own handles, once the navigation was seen setting it up. The switch file hud_inst decides instead (see chooseBox).
 //   * the BMW navigation has priority: while another client sends commands to 0x82, nothing is drawn (and the picture is redrawn later).
 // Cars with an Ethernet KOMBI (G-series, J29) get the same guidance over SOME/IP from librghook-kombi.so in mm-ipod (src/rgkombi.cpp,
 // kombi.h), which the installer chose; the installer's cluster file says whether this plugin draws on MOST too (kombiOnly below).
@@ -32,6 +40,7 @@ struct hud_timespec {
 };
 int clock_gettime(int, struct hud_timespec *);
 }
+#include "hudhandles.h"
 
 namespace hud {
 
@@ -87,7 +96,6 @@ const u32 kSubs[] = { 0xC0000002u, 0xC0000003u, kAttrRegistry, kInfoMessage, 0x8
                       0x80000003u, 0x80000004u, 0x80000005u,   0x80000006u,  0x80000007u };
 enum {
   kFBlock = 0x82,
-  kInst = 0,
   kOpStartResultAck = 6,
   kOpResultAck = 0xD
 };
@@ -102,12 +110,33 @@ void *g_conn;
 char *g_cli;
 volatile int g_attached, g_registered, g_lock;
 volatile u32 g_client;
-volatile u16 g_self, g_host, g_amHost;    // g_amHost: owner of AudioMaster 20/00 ("Media gestures", volume)
-volatile u16 g_host2;                     // HUDTerminal 82/02 (a BMW windscreen HUD's own terminal, if the registry has one)
+volatile u16 g_self, g_host, g_amHost;    // g_host: the terminal drawn on; g_amHost: owner of AudioMaster 20/00 ("Media gestures")
+volatile u16 g_hostOf[2];                 // HUDTerminal 82/00 and 82/02 in the MOST registry (0: not there)
 volatile u32 g_navMs, g_answers, g_sent;  // last command of another client to 0x82 (BMW navigation), answers from the cluster
+// The terminals (slot 0 = 82/00, slot 1 = 82/02): g_inst is drawn on, the other one gets copies (g_mirror) once the navigation set
+// it up or hud_inst asks for it. hud_inst fixes both (g_instFixed).
+u8 g_inst;
+volatile int g_mirror, g_instFixed, g_mirrorFixed;
+inline u8 instOf(int slot) {
+  return (u8)(slot ? 2 : 0);
+}
+inline int slotOf(u8 inst) {
+  return inst == 2 ? 1 : inst == 0 ? 0 : -1;
+}
 // the layout probe (detectLayout): ImageGetSize answered for handle 5 (the 6WA picture) / 0x1F (the 6WB plane); the BMW navigation
 // seen drawing on a 6WB handle (0x18..0x35)
 volatile int g_size5, g_size1f, g_seen6wb;
+// the picture buffer's size (measureBox): the handle asked, its answer (w, h) and the answers / refusals counted
+volatile u16 g_askH, g_askW, g_askHt;
+volatile int g_askOk, g_askErr;
+// the handles learnt from the navigation's set-up, per terminal (hudhandles.h): g_learnt[slot] is a complete map not yet used
+hudh::Learner g_learn[2];
+hudh::Map g_learntMap[2];
+volatile int g_learnt[2];
+// day / night (effect colour): -1 not seen, 0 day, 1 night. From the HMI's CarPlay night mode on MOST (AuxiliaryInput 24/70
+// CarPlaySetNightMode, CD7), as it passes; Vehicle 05/00 DayNight_ChangeOver (C31) is only logged (its values are not known).
+volatile int g_night = -1;
+volatile u32 g_dnLogged;
 
 u32 nowMs() {
   hud_timespec t;
@@ -294,18 +323,24 @@ void onData(void *, void *is) {
         logf1("CarPlayMenu: HUD: registry: HUDTerminal 82/%02x at device %04x", key & 0xff, rd16(p + 4 + i * 4));
     }
     listed = listed || cnt > 0;
+    u16 t0 = 0, t2 = 0;
     for (u32 i = 0; i < cnt && 4 + i * 4 + 4 <= len; i++) {
       u16 key = rd16(p + 4 + i * 4 + 2);
-      if (key == ((kFBlock << 8) | kInst) && !host)
-        host = rd16(p + 4 + i * 4);
-      if (key == ((kFBlock << 8) | 2) && !g_host2)
-        g_host2 = rd16(p + 4 + i * 4);
+      if (key == ((kFBlock << 8) | 0) && !t0)
+        t0 = rd16(p + 4 + i * 4);
+      if (key == ((kFBlock << 8) | 2) && !t2)
+        t2 = rd16(p + 4 + i * 4);
       if (key == ((kAudioMaster << 8) | 0) && !am)
         am = rd16(p + 4 + i * 4);
     }
+    g_hostOf[0] = t0;
+    g_hostOf[1] = t2;
+    if (!g_instFixed && cnt)  // no 82/00 but an 82/02: that one is drawn on
+      g_inst = (u8)(!t0 && t2 ? 2 : 0);
+    host = g_hostOf[slotOf(g_inst) < 0 ? 0 : slotOf(g_inst)];
     if (host != g_host) {
       g_host = host;
-      logf1("CarPlayMenu: HUD: HUDTerminal 82/00 at device %04x", host);
+      logf1("CarPlayMenu: HUD: drawing on HUDTerminal 82/%02x at device %04x", g_inst, host);
     }
     if (am != g_amHost) {
       g_amHost = am;
@@ -313,23 +348,51 @@ void onData(void *, void *is) {
     }
   } else if (id == kInfoMessage && len >= 32) {  // MessageType: tx, tag, val, dst, src, fblock, inst, fkt, op, tag, len, data
     u16 dst = rd16(p + 12), src = rd16(p + 14);
-    u8 fb = p[16], op = p[20];
+    u8 fb = p[16], inst = p[17], op = p[20];
+    u16 fkt = rd16(p + 18);
+    u32 an = len >= 32 ? rd32(p + 28) : 0;
+    if (32 + an > len)
+      an = 0;
+    // day / night, for the effect colour (see g_night): the HMI tells Connectivity CarPlay's night mode (a method: sender handle, then
+    // the value, last byte non-zero = night; read from the HMI's MOST map, not seen in a car yet). The first sightings are logged.
+    if ((fb == 0x24 && inst == 0x70 && fkt == 0xCD7) || (fb == 0x05 && fkt == 0xC31)) {
+      if (g_dnLogged < 12) {
+        g_dnLogged++;
+        dbgLine(fb == 5 ? "day/night Vehicle C31" : "day/night CarPlaySetNightMode", fkt, op, p + 32, an, true);
+      }
+      if (fb == 0x24 && an >= 1 && (op == 0 || op == 2 || op == 6 || op == 0xC)) {
+        int n = p[32 + an - 1] != 0;
+        if (n != g_night) {
+          g_night = n;
+          if (g_log)
+            g_log(n ? "CarPlayMenu: HUD: night (CarPlay night mode from the HMI)"
+                    : "CarPlayMenu: HUD: day (CarPlay night mode from the HMI)");
+        }
+      }
+      return;
+    }
     if (fb != kFBlock)
       return;
     if (op == kOpResultAck && dst == g_self)
       g_answers++;
     u32 varTag = rd32(p + 4), varVal = rd32(p + 8);
-    u16 fkt = rd16(p + 18);
     // ImageGetSize answers: [handle][w][h] (F54, 6 bytes) or [handle][01][w][h] (6WB, 7 bytes), sizes u16 big-endian. The F54 also
-    // answers for handles it does not have, with 0 x 0: only a real size counts.
-    u32 an = len >= 32 ? rd32(p + 28) : 0;
-    if (fkt == 0xC04 && op == kOpResultAck && dst == g_self && (an == 6 || an == 7) && 32 + an <= len) {
-      const u8 *a = p + 32 + (an == 7 ? 3 : 2);
-      u16 h = (u16)(p[32] << 8 | p[33]), w = (u16)(a[0] << 8 | a[1]), ht = (u16)(a[2] << 8 | a[3]);
-      if (w && ht && h == 5)
-        g_size5 = 1;
-      if (w && ht && h == 0x1f)
-        g_size1f = 1;
+    // answers for handles it does not have, with 0 x 0: only a real size counts. Only the terminal drawn on.
+    if (fkt == 0xC04 && dst == g_self && src != g_self && inst == g_inst) {
+      if (op == kOpResultAck && (an == 6 || an == 7)) {
+        const u8 *a = p + 32 + (an == 7 ? 3 : 2);
+        u16 h = (u16)(p[32] << 8 | p[33]), w = (u16)(a[0] << 8 | a[1]), ht = (u16)(a[2] << 8 | a[3]);
+        if (w && ht && h == 5)
+          g_size5 = 1;
+        if (w && ht && h == 0x1f)
+          g_size1f = 1;
+        if (h == g_askH) {
+          g_askW = w;
+          g_askHt = ht;
+          g_askOk = 1;
+        }
+      } else if (op == 0xF || op == 9)
+        g_askErr++;
     }
     dbgMsg(src == g_self ? "echo" : dst == g_self ? "in  " : "seen", src, dst, fkt, op, p, len);
     bool normal = varTag == 2 && !(varVal >= 4 && varVal <= 9);  // not the send status of a message of ours
@@ -338,12 +401,27 @@ void onData(void *, void *is) {
     const u8 *dd = p + 32;
     if (32 + dn > len)
       dn = 0;
+    // the navigation's set-up answers (the cluster's ResultAck to another client: we create nothing), per terminal
+    int slot = slotOf(inst);
+    if (op == kOpResultAck && src != g_self && dst != g_self && normal && slot >= 0 && (fkt == 0x200 || fkt == 0x22B)) {
+      hudh::Learner &L = g_learn[slot];
+      if (fkt == 0x200)
+        L.created(dd, dn);
+      else {
+        u16 bar = L.m.bar;
+        bool now = L.added(dd, dn);
+        if (now || (L.done && L.m.bar != bar)) {  // complete, or the bargraph that follows the texts
+          g_learntMap[slot] = L.m;
+          g_learnt[slot] = 1 + (L.family() == 11);
+        }
+      }
+    }
     if (op <= 8 && src != g_self && normal && drawing && !isOurs(fkt, dd, dn)) {  // another client (the BMW navigation) drawing
-      if (dn >= 2 && (dd[0] << 8 | dd[1]) >= 0x18 && (dd[0] << 8 | dd[1]) <= 0x35)  // 6WB only: the F54's surfaces end at 0x17
+      if (inst == g_inst && dn >= 2 && (dd[0] << 8 | dd[1]) >= 0x18 && (dd[0] << 8 | dd[1]) <= 0x35)  // 6WB: the F54's end at 0x17
         g_seen6wb = 1;
       if (!g_navMs) {
         char m[120];
-        snprintf(m, sizeof m, "CarPlayMenu: HUD: other client on 82/00: %04x -> %04x fkt %03x op %u", src, dst, fkt, op);
+        snprintf(m, sizeof m, "CarPlayMenu: HUD: other client on 82/%02x: %04x -> %04x fkt %03x op %u", inst, src, dst, fkt, op);
         if (g_log)
           g_log(m);
       }
@@ -416,11 +494,38 @@ enum {
   kAddPolygon = 0x21D,
   kRemoveAll = 0x220
 };
-// Where the picture is. The shapes below are drawn in the 6WA box (70,20)-(170,120) (F20, NBT-AAD). The MINI F54 cluster shows a smaller
-// area: its BMW navigation draws turn arrows in about x 37..83, y 1..68 (captured in the car, HMI ID5_1703-490, 2026-11-11), and a test
-// arrow there was visible while ours in the 6WA box was not (text was). On a MINI (its layout package is present) every point is mapped
-// to (35,15)-(85,65); the file hud_box_6wa in the settings folder keeps the 6WA box.
-bool g_boxMini;
+// Where the picture is. The shapes below are drawn in the 6WA box (70,20)-(170,120) (F20, NBT-AAD), which needs a picture buffer of at
+// least 170 x 120. The MINI F54's buffers are 120 x 72 (ImageGetSize, car 2026-11-13; 128 x 74 surfaces in its firmware): its BMW
+// navigation draws turn arrows in about x 37..83, y 1..68 (captured in the car, HMI ID5_1703-490, 2026-11-11), and a test arrow there
+// was visible while ours in the 6WA box was not (text was). So:
+//   * kBox6wa: drawn as they are;
+//   * kBoxMini: every point mapped to (35,15)-(85,65) by halving (toMini, the car-verified MINI drawing);
+//   * kBoxFit: mapped linearly onto g_box (toBox).
+// The start: MINI when its layout package is present, else 6WA. Then measureBox asks the cluster for the picture buffer's size and
+// fits the box to the buffer (fitBox): 120 x 72 gives the MINI box, 170 x 120 or more the 6WA box. (The F25 X3 answers 0 x 0 for
+// buffer 5, issue #9: its pictures are other instances, which the set-up gives; ghackt's hud_box mini was verified there.) Switch files decide instead:
+// hud_box_6wa (the 6WA box), hud_box "mini" / "6wa" / "<x> <y> <size>" (ghackt's form, a square) / "<x0> <y0> <x1> <y1>" (PR #13,
+// FreZZZeR: (35,15)-(85,65) verified on an F30 6WB with a 126 x 77 buffer).
+enum {
+  kBox6wa = 0,
+  kBoxMini = 1,
+  kBoxFit = 2
+};
+int g_boxMode;
+bool g_boxFixed;  // a switch chose the box: measureBox leaves it alone
+Box g_box;
+// hud_hide (PR #13, FreZZZeR): handles (decimal) made invisible on every picture, for a surface the cluster shows itself over other
+// content (an F30 6WB puts its own distance bar on 0x15/0x16 over the speed: "21 22", car-verified). On the F54 those are the bars.
+u16 g_hide[8];
+u32 g_nHide;
+// hud_comma (ghackt, issue #12): the iPhone writes distances in the phone's locale, "1,5 km" in NL / DE / FR; the clusters' filters
+// made the comma a space ("1 5 km", car-reported on an F31). The distance's comma goes as a point ("1.5"), as the plugin's own
+// metres fallback writes it; with hud_comma it goes as it is. Commas in the street stay spaces.
+bool g_comma;
+// hud_colour_day: the effect colour while the HMI's CarPlay night mode says day (g_night 0). The F54's palette differs by day: its
+// colour 5, orange at night, is green by day (car-reported 2026-11-18); which index is orange by day is not measured yet
+// (hud_probe.sh colours in daylight). Without the file the effect colour is the same day and night.
+int g_fxDay = -1;
 u8 g_fillDim = 3;  // the context tone: grey (F54; 0x0A, the first choice, is transparent there); hud_mono draws everything in kFill
 // Test switches (files in the settings folder, read when the HUD starts; all off by default, the drawing without them is unchanged):
 //   hud_convex   the convex pieces of before instead of whole polygons. Whole polygons (hudshapes.h mergePieces, a few calls a picture
@@ -467,13 +572,91 @@ bool readSwitch(const char *name, u32 *a, u32 *b) {
   }
   return true;
 }
+// value of one hex digit, -1 if c is not one
+int hexv(char c) {
+  return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+// a switch file's first word, lower case ("mini", "6wa"); empty without the file
+void readWord(const char *name, char *w, u32 cap) {
+  char path[96];
+  snprintf(path, sizeof path, "/var/opt/hmi/data/rw/carplaymenu/%s", name);
+  w[0] = 0;
+  int fd = open(path, 0);
+  if (fd < 0)
+    return;
+  char t[16];
+  long n = read(fd, t, sizeof t - 1);
+  close(fd);
+  u32 k = 0;
+  for (long i = 0; i < n && k + 1 < cap; i++) {
+    char c = t[i];
+    if (c >= 'A' && c <= 'Z')
+      c = (char)(c - 'A' + 'a');
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
+      break;
+    w[k++] = c;
+  }
+  w[k] = 0;
+}
+// a switch file's numbers (decimal or 0x hex), up to max: how many (-1: no file)
+int readNums(const char *name, u32 *v, u32 max) {
+  char path[96];
+  snprintf(path, sizeof path, "/var/opt/hmi/data/rw/carplaymenu/%s", name);
+  int fd = open(path, 0);
+  if (fd < 0)
+    return -1;
+  char t[64];
+  long n = read(fd, t, sizeof t - 1);
+  close(fd);
+  if (n < 0)
+    n = 0;
+  t[n] = 0;
+  u32 k = 0;
+  for (char *q = t; *q && k < max;) {
+    if (*q >= '0' && *q <= '9') {
+      u32 x = 0;
+      if (q[0] == '0' && (q[1] == 'x' || q[1] == 'X'))
+        for (q += 2; hexv(*q) >= 0; q++)
+          x = x << 4 | (u32)hexv(*q);
+      else
+        while (*q >= '0' && *q <= '9')
+          x = x * 10 + (u32)(*q++ - '0');
+      v[k++] = x;
+    } else
+      q++;
+  }
+  return (int)k;
+}
+void logBox(const char *why) {
+  char m[160];
+  if (g_boxMode == kBoxFit)
+    snprintf(m, sizeof m, "CarPlayMenu: HUD: picture box (%d,%d)-(%d,%d) (%s)", g_box.x0, g_box.y0, g_box.x1, g_box.y1, why);
+  else
+    snprintf(m, sizeof m, "CarPlayMenu: HUD: picture box %s (%s)",
+             g_boxMode == kBoxMini ? "MINI (35,15)-(85,65)" : "6WA (70,20)-(170,120)", why);
+  if (g_log)
+    g_log(m);
+}
+// hud_inst (ghackt, issue #1): "<drawn on> [<copy to>]", e.g. "0 2" (82/00, copies to 82/02), "2" (82/02 only), "0" (no copies)
+void readInst() {
+  u32 in[2];
+  int ni = readNums("hud_inst", in, 2);
+  if (ni >= 1 && slotOf((u8)in[0]) >= 0 && in[0] < 256) {
+    g_inst = (u8)in[0];
+    g_instFixed = 1;
+    g_mirrorFixed = 1;
+    g_mirror = ni >= 2 && in[1] != in[0] && slotOf((u8)in[1]) >= 0;
+    logf1("CarPlayMenu: HUD: drawing on HUDTerminal 82/%02x, copies to the other terminal %u (switch hud_inst)", g_inst, g_mirror);
+  } else if (ni >= 0 && g_log)
+    g_log("CarPlayMenu: HUD: hud_inst: only 0 and 2 are known terminals, ignored");
+}
 void chooseBox() {
   int mono = open("/var/opt/hmi/data/rw/carplaymenu/hud_mono", 0);
   if (mono >= 0) {
     close(mono);
     g_fillDim = 4;
   }
-  u32 cap = g_fxCap, col = g_fxColour;
+  u32 cap = g_fxCap, col = g_fxColour, day = 0;
   g_concave = !readSwitch("hud_convex", 0, 0);
   g_fillOn = readSwitch("hud_fill", &cap, &col);
   g_blinkOn = readSwitch("hud_blink", 0, 0);  // the menu writes "1": no colour in it
@@ -482,26 +665,68 @@ void chooseBox() {
     g_fxCap = cap;
   if (col < 20)
     g_fxColour = (u8)col;
+  if (readNums("hud_colour_day", &day, 1) == 1 && day < 20)
+    g_fxDay = (int)day;
   logf1("CarPlayMenu: HUD: test switches concave %u fill %u blink %u", g_concave, g_fillOn, g_blinkOn);
   if (g_fillOn || g_blinkOn)
-    logf1("CarPlayMenu: HUD: effect cap %u m, colour %u", g_fxCap, g_fxColour);
+    logf1("CarPlayMenu: HUD: effect cap %u m, colour %u, by day %d", g_fxCap, g_fxColour, (u32)g_fxDay);
   int f = open("/opt/hmi/data/ro/mini/id5/widget/generated/Spec_State_Merged.pbw", 0);
   if (f < 0)
     f = open("/opt/hmi/ID5/data/ro/mini/id5/widget/generated/Spec_State_Merged.pbw", 0);
-  g_boxMini = f >= 0;
+  g_boxMode = f >= 0 ? kBoxMini : kBox6wa;
   if (f >= 0)
     close(f);
+  const char *why = g_boxMode == kBoxMini ? "a MINI" : "the default";
   int o = open("/var/opt/hmi/data/rw/carplaymenu/hud_box_6wa", 0);
   if (o >= 0) {
     close(o);
-    g_boxMini = false;
+    g_boxMode = kBox6wa;
+    g_boxFixed = true;
+    why = "switch hud_box_6wa";
   }
-  if (g_log)
-    g_log(g_boxMini ? "CarPlayMenu: HUD: picture box MINI (35,15)-(85,65)" : "CarPlayMenu: HUD: picture box 6WA (70,20)-(170,120)");
+  char w[8];
+  readWord("hud_box", w, sizeof w);
+  u32 bx[4];
+  int nb = w[0] >= '0' && w[0] <= '9' ? readNums("hud_box", bx, 4) : 0;
+  if (w[0] == 'm' || w[0] == '6') {
+    g_boxMode = w[0] == 'm' ? kBoxMini : kBox6wa;
+    g_boxFixed = true;
+    why = "switch hud_box";
+  } else if (nb == 3 && bx[2] >= 10 && bx[2] <= 400 && bx[0] < 1000 && bx[1] < 1000) {
+    Box b = { (int)bx[0], (int)bx[1], (int)(bx[0] + bx[2]), (int)(bx[1] + bx[2]) };
+    g_box = b;
+    g_boxMode = kBoxFit;
+    g_boxFixed = true;
+    why = "switch hud_box";
+  } else if (nb == 4 && bx[2] > bx[0] && bx[3] > bx[1] && bx[2] < 1000 && bx[3] < 1000) {
+    Box b = { (int)bx[0], (int)bx[1], (int)bx[2], (int)bx[3] };
+    g_box = b;
+    g_boxMode = kBoxFit;
+    g_boxFixed = true;
+    why = "switch hud_box";
+  }
+  logBox(why);
+  u32 hv[8];
+  int nh = readNums("hud_hide", hv, 8);
+  g_nHide = 0;
+  for (int i = 0; i < nh; i++)
+    if (hv[i] && hv[i] < 0x100)
+      g_hide[g_nHide++] = (u16)hv[i];
+  if (g_nHide)
+    logf1("CarPlayMenu: HUD: hud_hide: %u handle(s) made invisible on every picture", g_nHide);
+  g_comma = readSwitch("hud_comma", 0, 0);
+  if (g_comma && g_log)
+    g_log("CarPlayMenu: HUD: the distance's decimal comma sent as it is (switch hud_comma)");
+  readInst();
 }
-// The handles: the 6WA profile (F20, NBT-AAD; also the MINI F54) unless detectLayout finds the 6WB layout.
-u16 hFrame = 1, hStreet = 2, hDist = 3, hUnit = 4, hBufA = 5, hBufB = 6;
-enum { kFill = 4 };  // the BMW navigation's colour on 6WA, F54 and 6WB alike (JayJay's 6WB recording: 21B 04 / 0A)
+// The handles of the terminal drawn on: the 6WA profile (F20, NBT-AAD; also the MINI F54) until the navigation's set-up (hudhandles.h)
+// or a map kept from an earlier start gives them, or detectLayout finds the 6WB layout. hBar: the distance bar (known from a set-up only).
+u16 hFrame = 1, hStreet = 2, hDist = 3, hUnit = 4, hBufA = 5, hBufB = 6, hBar;
+bool g_mapKnown;  // the handles came from a set-up (this start's or a kept one): detectLayout's 6WB handles do not replace them
+// The other terminal's handles for its copies (g_mirror): from its own set-up; until then the same numbers.
+hudh::Map g_mmap;
+bool g_mmapKnown;
+const u8 kFill = 4;  // the BMW navigation's colour on 6WA, F54 and 6WB alike (JayJay's 6WB recording: 21B 04 / 0A)
 // 6WB: texts in ISO-8859-15 (encoding 01, as verified there; the big distance font has no comma) and the picture moved from the 6WA
 // box (70,20)-(170,120) into the plane, centred on x 116 like JayJay's arrows: (66,40)-(166,140) of 221 x 158
 bool g_6wb;
@@ -529,12 +754,49 @@ bool send(u16 dst, u8 fb, u8 inst, u16 fkt, u8 op, const u8 *d, u32 n) {
   unlock();
   return ok;
 }
-bool call(u16 fkt, const u8 *d, u32 n) {
+// one of our handles in the other terminal's numbering (its set-up's map; unknown handles stay as they are)
+u16 mirrorHandle(u16 h) {
+  if (!g_mmapKnown)
+    return h;
+  const hudh::Map &m = g_mmap;
+  return h == hFrame          ? m.frame
+         : h == hStreet       ? m.street
+         : h == hDist         ? m.dist
+         : h == hUnit         ? m.unit
+         : h == hBufA         ? m.bufA
+         : h == hBufB         ? m.bufB
+         : h == hBar && m.bar ? m.bar
+                              : h;
+}
+// the other terminal's host while it gets copies (g_mirror), else 0
+u16 mirrorHost() {
+  int sl = slotOf(g_inst);
+  return g_mirror && sl >= 0 ? g_hostOf[1 - sl] : 0;
+}
+// Every drawing call goes to the terminal drawn on and, while g_mirror, to the other one with its handles: all of them start with a
+// handle, SwitchVisibility (20E) with two. Not the size question (C04): its answer steers this terminal only. primary: only here.
+bool call(u16 fkt, const u8 *d, u32 n, bool primary = false) {
   if (!g_registered || !g_host)
     return false;
   dbgOut(fkt, d, n);
   noteSent(fkt, d, n);
-  bool ok = send(g_host, kFBlock, kInst, fkt, kOpStartResultAck, d, n);
+  bool ok = send(g_host, kFBlock, g_inst, fkt, kOpStartResultAck, d, n);
+  u16 mh = primary || fkt == 0xC04 ? 0 : mirrorHost();
+  if (mh && n >= 2 && n <= 300) {
+    static u8 m[300];
+    memcpy(m, d, n);
+    u16 h = mirrorHandle((u16)(d[0] << 8 | d[1]));
+    m[0] = (u8)(h >> 8);
+    m[1] = (u8)h;
+    if (fkt == 0x20E && n >= 4) {
+      h = mirrorHandle((u16)(d[2] << 8 | d[3]));
+      m[2] = (u8)(h >> 8);
+      m[3] = (u8)h;
+    }
+    noteSent(fkt, m, n);
+    usleep(5000);
+    send(mh, kFBlock, instOf(1 - slotOf(g_inst)), fkt, kOpStartResultAck, m, n);
+  }
   usleep(20000);  // like the navigation: one call at a time, no bursts
   return ok;
 }
@@ -547,16 +809,21 @@ void be16(u8 *o, u16 v) {
   o[0] = (u8)(v >> 8);
   o[1] = (u8)v;
 }
+// handle 0 is no instance ("instance 0 is forbidden", the navigation's trace): a text switched off by hud_text_handles
 bool callH(u16 fkt, u16 h) {
+  if (!h)
+    return true;
   u8 d[2];
   be16(d, h);
   return call(fkt, d, 2);
 }
-bool callHB(u16 fkt, u16 h, u8 b) {
+bool callHB(u16 fkt, u16 h, u8 b, bool primary = false) {
+  if (!h)
+    return true;
   u8 d[3];
   be16(d, h);
   d[2] = b;
-  return call(fkt, d, 3);
+  return call(fkt, d, 3, primary);
 }
 bool switchVis(u16 hide, u16 show) {
   u8 d[4];
@@ -564,17 +831,43 @@ bool switchVis(u16 hide, u16 show) {
   be16(d + 2, show);
   return call(kSwitchVisibility, d, 4);
 }
+// One character of a text for the cluster's font (a code point; 0: left out). Typographic characters that apps put into street names
+// (Yandex Navi's street names stopped showing while Apple's and Google's did, 2026-11-18; a cluster may refuse a text with a
+// character its font lacks) become their plain forms: no-break and other spaces a space, dashes '-', quotes ' and ", the ellipsis
+// '.'; invisible format characters (soft hyphen, zero width, direction marks, BOM) are left out. A comma: in the distance a point
+// (hud_comma: the comma), elsewhere a space.
+u32 textChar(u32 c, bool dist) {
+  if (c == ',')
+    return dist ? (g_comma ? ',' : '.') : ' ';
+  if (c < 0x20 || c == 0x7f || (c >= 0x80 && c < 0xa0) || c > 0xffff)
+    return ' ';
+  if (c == 0xa0 || (c >= 0x2000 && c <= 0x200a) || c == 0x202f || c == 0x205f || c == 0x3000)
+    return ' ';
+  if (c == 0xad || (c >= 0x200b && c <= 0x200f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2060 && c <= 0x2069) || c == 0xfeff)
+    return 0;
+  if ((c >= 0x2010 && c <= 0x2015) || c == 0x2212)
+    return '-';
+  if (c == 0x2018 || c == 0x2019 || c == 0x201a || c == 0x2032)
+    return '\'';
+  if (c == 0x201c || c == 0x201d || c == 0x201e || c == 0xab || c == 0xbb)
+    return '"';
+  if (c == 0x2026)
+    return '.';
+  return c;
+}
 // handle, 00, UTF-16BE, 00 00. The street names come from the iPhone in UTF-8; the MINI F54 cluster shows Latin with diacritics and
 // Cyrillic (tested in the car with "ŽĐ Бул"), so they are converted, not stripped. Up to 32 characters; outside the BMP, control
-// characters and broken sequences become a space.
+// characters and broken sequences become a space. hud_text_handles may set a text's handle to 0: not drawn.
 bool setText(u16 h, const char *s) {
+  if (!h)
+    return true;
   u8 d[2 + 1 + 32 * 2 + 2];
   u32 n = 0;
   be16(d, h);
   n = 2;
   d[n++] = g_6wb ? 1 : 0;  // 6WB: ISO-8859-15 (JayJay), else UTF-16BE
   const u8 *q = (const u8 *)s;
-  for (u32 k = 0; *q && k < 32; k++) {
+  for (u32 k = 0; *q && k < 32;) {
     u32 c = *q++, more = 0;
     if (c >= 0xf0) {
       c &= 0x07;
@@ -590,8 +883,10 @@ bool setText(u16 h, const char *s) {
     }
     for (; more && (*q & 0xc0) == 0x80; more--)
       c = c << 6 | (*q++ & 0x3f);
-    if (more || c < 0x20 || c > 0xffff || c == ',')
-      c = ' ';
+    c = more ? ' ' : textChar(c, h == hDist);
+    if (!c)
+      continue;
+    k++;
     if (g_6wb) {
       d[n++] = (u8)(c == 0x20ac ? 0xa4 : c <= 0xff ? c : '?');  // ISO-8859-15: the euro sign, the rest of Latin-1
       continue;
@@ -611,11 +906,11 @@ bool polygon(u16 h, u16 idx, const Pt *p, u32 k, bool whole = false) {
     return false;
   for (u32 i = 0; i < k; i++)
     q[i] = p[i];
-  if (g_boxMini) {
-    k = whole ? toMiniPoly(q, k) : toMini(q, k);
+  if (g_boxMode != kBox6wa) {  // the MINI cluster's picture area (half size), or the box fitted to the buffer
+    k = g_boxMode == kBoxMini ? (whole ? toMiniPoly(q, k) : toMini(q, k)) : whole ? toBoxPoly(q, k, g_box) : toBox(q, k, g_box);
     if (k < 3)
       return true;
-  }  // half size, the MINI cluster's picture area
+  }
   if (g_6wb)
     for (u32 i = 0; i < k; i++) {
       q[i].x -= 4;
@@ -704,7 +999,7 @@ bool readGuide(Guide &g) {
   b[n] = 0;
   u32 rs = 0;
   bool man = false;
-  char cur[40] = "";
+  char cur[96] = "";
   for (char *l = b; *l;) {
     char *e = l;
     while (*e && *e != '\n')
@@ -853,8 +1148,12 @@ char g_lastRoad[96], g_lastNum[9], g_lastUnit[8];
 u16 otherBuf(u16 b) {
   return b == hBufA ? hBufB : hBufA;
 }
+// the effect colour: hud_colour_day's while the HMI says day, else the effect colour
+u8 fxColour() {
+  return g_night == 0 && g_fxDay >= 0 ? (u8)g_fxDay : g_fxColour;
+}
 u8 toneColour(u32 t) {
-  return t == 2 ? g_fxColour : t == 1 ? g_fillDim : (u8)kFill;
+  return t == 2 ? fxColour() : t == 1 ? g_fillDim : (u8)kFill;
 }
 Shape g_shape;
 Polys g_polys;  // large: not on the worker thread's stack
@@ -872,7 +1171,7 @@ void drawPicture(u16 buf, const Guide &g, u32 level, bool high) {
   addLanes(s, g.lanes, g.nl, g.side == 1);  // the iPhone's lanes under the arrow, while it shows them
   callH(kRemoveAll, buf);
   callHB(kSetLineWidth, buf, g_6wb ? 6 : 0);  // 6WB: the outlines (polygon); JayJay: 6 looks right, 0x16 far too thick
-  callHB(kSetFillColor, buf, kFill);  // as the BMW navigation does
+  callHB(kSetFillColor, buf, kFill);          // as the BMW navigation does
   u32 tone = 0;
   if (g_concave) {  // whole polygons (always, unless the test switch hud_convex)
     mergePieces(s, g_polys);
@@ -910,6 +1209,12 @@ void drawManeuver(const Guide &g, const char *dn, const char *du, u32 level = 0)
   setText(hDist, dn);
   setText(hUnit, du);
   callHB(kSetVisibility, hFrame, 1);
+  // The frame's distance bar (its handle known from the set-up): we never set its value, so it would show whatever the cluster has
+  // (an F30 6WB showed a bar over the speed, PR #13): hidden, on both terminals.
+  if (hBar)
+    callHB(kSetVisibility, hBar, 0);
+  for (u32 i = 0; i < g_nHide; i++)  // hud_hide: surfaces the cluster shows itself over other content (this terminal only)
+    callHB(kSetVisibility, g_hide[i], 0, true);
   g_shown = true;
 }
 void drawClear() {  // the state the BMW navigation leaves the terminal in at the end of a route
@@ -932,14 +1237,10 @@ void drawClear() {  // the state the BMW navigation leaves the terminal in at th
 }
 
 // Test channel: /dev/shmem/carplaymenu-hudcmd, one HUDTerminal call per line, "fkt hexbytes" (e.g. "21d 0005000003040070007800800078"),
-// a line "@2" sends the following calls to HUDTerminal 82/02 (a windscreen HUD's own terminal; "@0" back to the cluster's 82/00),
+// a line "@2" sends the following calls to HUDTerminal 82/02 ("@0" back to 82/00; no copies to the other terminal here),
 // run once and the file deleted; to try a cluster's layout without rebuilding the plugin. Lines starting with # are skipped. Each
 // batch restarts the 600-line HUD debug log, so its calls and the cluster's answers land in the log (tools/hud_probe.sh).
 const char *const kCmd = "/dev/shmem/carplaymenu-hudcmd";
-// value of one hex digit, -1 if c is not one
-int hexv(char c) {
-  return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
-}
 void runCmds() {
   int fd = open(kCmd, 0);
   if (fd < 0)
@@ -963,8 +1264,8 @@ void runCmds() {
     *e = 0;
     if (*l == '@') {
       inst = (u8)(l[1] == '2' ? 2 : 0);
-      if (inst && !g_host2 && g_log)
-        g_log("CarPlayMenu: HUD: test channel: no HUDTerminal 82/02 in the registry, its calls are skipped");
+      if (!g_hostOf[inst ? 1 : 0])
+        logf1("CarPlayMenu: HUD: test channel: no HUDTerminal 82/%02x in the registry, its calls are skipped", inst);
     } else if (*l && *l != '#') {
       u32 fkt = 0;
       char *q = l;
@@ -984,13 +1285,11 @@ void runCmds() {
           hi = -1;
         }
       }
-      if (fkt && inst == 0) {
-        call((u16)fkt, d, k);
-        ran++;
-      } else if (fkt && g_host2) {
+      u16 host = g_hostOf[inst ? 1 : 0];  // exactly the terminal asked for, no copies
+      if (fkt && host) {
         noteSent((u16)fkt, d, k);
-        dbgLine("out 82/02", (u16)fkt, kOpStartResultAck, d, k);
-        send(g_host2, kFBlock, 2, (u16)fkt, kOpStartResultAck, d, k);
+        dbgLine(inst ? "out 82/02" : "out ", (u16)fkt, kOpStartResultAck, d, k);
+        send(host, kFBlock, inst, (u16)fkt, kOpStartResultAck, d, k);
         usleep(20000);
         ran++;
       }
@@ -1014,49 +1313,122 @@ bool kombiOnly() {
   return b[0] == 'k';
 }
 
-// The BMW navigation creates its instances by name (its CIcHudComm_TF1_3 "Old IC" and CIcHudComm_TF11_13 "FPK" back-ends, names
-// read from NavNBTEvoController 006), and HUDTerminal.GetInstanceId(name) answers the handle on any cluster. Its function number
-// is 201 or 202 (not proven): with "HUD debug log" on, both are asked for a few names on 82/00 and on 82/02 (a windscreen HUD's own
-// terminal), and the answers land in the log. Every probe starts with handle 0000, so if the number is ReleaseInstance instead, it
-// can only hit a handle that does not exist. Nothing is decided from the answers yet.
-void probeNames() {
-  static const char *const names[] = { "TopFrame", "1.GuidingIcon", "Top_Frame_11", "Guiding_Arrow_11_1", "Bargraph_11_1" };
-  u16 hosts[2] = { g_host, g_host2 };
-  for (int t = 0; t < 2; t++) {
-    if (!hosts[t])
-      continue;
-    for (u32 n = 0; n < sizeof names / sizeof names[0]; n++)
-      for (u16 fkt = 0x201; fkt <= 0x202; fkt++) {
-        u8 d[40];
-        u32 k = 0;
-        d[k++] = 0;
-        d[k++] = 0;   // handle 0000
-        d[k++] = 1;   // ISO-8859-15
-        for (const char *c = names[n]; *c && k < sizeof d - 1; c++)
-          d[k++] = (u8)*c;
-        d[k++] = 0;
-        noteSent(fkt, d, k);
-        dbgLine(t ? "out 82/02" : "out ", fkt, kOpStartResultAck, d, k);
-        send(hosts[t], kFBlock, (u8)(t ? 2 : 0), fkt, kOpStartResultAck, d, k);
-        usleep(20000);
-      }
+// ---- set-up: terminals, handles, picture size -----------------------------------------------------------------------------------
+// The handle map per terminal, kept for the next start and for the sender in mm-ipod (it starts long after the navigation's set-up):
+// hud_handles (82/00), hud_handles_2 (82/02), "frame street distance unit pictureA pictureB bar" (hudhandles.h format / parse).
+const char *handlesFile(int slot) {
+  return slot ? "/var/opt/hmi/data/rw/carplaymenu/hud_handles_2" : "/var/opt/hmi/data/rw/carplaymenu/hud_handles";
+}
+void saveMap(int slot, const hudh::Map &m) {
+  char t[64];
+  u32 n = hudh::format(m, t, sizeof t);
+  if (!n)
+    return;
+  int fd = open(handlesFile(slot), 0x301 /* O_WRONLY | O_CREAT | O_TRUNC */, 0644);
+  if (fd < 0)
+    return;
+  write(fd, t, n);
+  close(fd);
+}
+bool loadMap(int slot, hudh::Map &m) {
+  int fd = open(handlesFile(slot), 0);
+  if (fd < 0)
+    return false;
+  char t[64];
+  long n = read(fd, t, sizeof t - 1);
+  close(fd);
+  if (n <= 0)
+    return false;
+  t[n] = 0;
+  return hudh::parse(t, m);
+}
+void logMap(const char *head, const hudh::Map &m, const char *why) {
+  char t[200];
+  snprintf(t, sizeof t, "CarPlayMenu: HUD: %s: panel %u street %u distance %u unit %u picture %u/%u bar %u (%s)", head,
+           (u32)m.frame, (u32)m.street, (u32)m.dist, (u32)m.unit, (u32)m.bufA, (u32)m.bufB, (u32)m.bar, why);
+  if (g_log)
+    g_log(t);
+}
+// hud_text_handles (ghackt, issue #9): "<street> <distance> <unit>" (decimal or 0x hex; 0 = that text not drawn) for a cluster whose
+// texts the set-up did not give (the F25 X3: 0x0c 0x12 0x0f, verified by its owner)
+void textOverride() {
+  u32 th[3];
+  if (readNums("hud_text_handles", th, 3) == 3 && th[0] < 0x100 && th[1] < 0x100 && th[2] < 0x100) {
+    hStreet = (u16)th[0];
+    hDist = (u16)th[1];
+    hUnit = (u16)th[2];
+    logf1("CarPlayMenu: HUD: texts on street %u, distance %u, unit %u (switch hud_text_handles)", hStreet, hDist, hUnit);
   }
-  logf1("CarPlayMenu: HUD: name probes sent (GetInstanceId 201/202) to 82/00 at %04x and 82/02 at %04x", g_host, g_host2);
+}
+bool g_measureDue = true;  // the picture buffer's size is to be asked (at start, and after the handles changed)
+void drawClear();
+// the terminal drawn on gets these handles; what is on show is cleared first (on the old ones) and drawn again on the new ones
+void useMap(const hudh::Map &m, const char *why) {
+  if (g_shown)
+    drawClear();
+  hFrame = m.frame;
+  hStreet = m.street;
+  hDist = m.dist;
+  hUnit = m.unit;
+  hBufA = m.bufA;
+  hBufB = m.bufB;
+  hBar = m.bar;
+  g_visible = hBufB;  // drawClear's rule: buffer B is the one shown when nothing is drawn
+  g_mapKnown = true;
+  g_measureDue = true;
+  char head[40];
+  snprintf(head, sizeof head, "handles on 82/%02x", g_inst);
+  logMap(head, m, why);
+  textOverride();
+}
+// the other terminal's map: its copies use it, and (unless hud_inst decided) the copies start
+void useMirrorMap(const hudh::Map &m, const char *why) {
+  g_mmap = m;
+  g_mmapKnown = true;
+  char head[48];
+  snprintf(head, sizeof head, "handles on 82/%02x (copies)", instOf(1 - slotOf(g_inst)));
+  logMap(head, m, why);
+  if (!g_mirrorFixed && !g_mirror) {
+    g_mirror = 1;
+    logf1("CarPlayMenu: HUD: copies to HUDTerminal 82/%02x (the navigation set it up; hud_inst \"%u\" stops them)",
+          instOf(1 - slotOf(g_inst)), g_inst);
+  }
+}
+// a set-up the DSI thread completed (g_learnt): kept, and used
+void takeLearnt() {
+  int me = slotOf(g_inst);
+  for (int sl = 0; sl < 2; sl++) {
+    int v = g_learnt[sl];
+    if (!v)
+      continue;
+    g_learnt[sl] = 0;
+    hudh::Map m = g_learntMap[sl];
+    saveMap(sl, m);
+    const char *why = v == 2 ? "from the navigation's set-up, frames 11-13, untried" : "from the navigation's set-up";
+    if (sl == me)
+      useMap(m, why);
+    else
+      useMirrorMap(m, why);
+  }
 }
 
 void use6wb(const char *why) {
-  hFrame = 0x17;
-  hStreet = 0x1a;
-  hDist = 0x1b;
-  hUnit = 0x1c;
-  hBufA = 0x1f;
-  hBufB = 0x20;
-  g_visible = hBufB;
   g_6wb = true;
-  g_boxMini = false;
+  g_boxMode = kBox6wa;  // the plane has its own mapping (polygon)
+  if (!g_mapKnown) {
+    hFrame = 0x17;
+    hStreet = 0x1a;
+    hDist = 0x1b;
+    hUnit = 0x1c;
+    hBufA = 0x1f;
+    hBufB = 0x20;
+    g_visible = hBufB;
+    textOverride();
+  }
   if (g_log) {
     char m[160];
-    snprintf(m, sizeof m, "CarPlayMenu: HUD: cluster layout 6WB (%s): area 0x17, texts 0x1a-0x1c, picture 0x1f/0x20", why);
+    snprintf(m, sizeof m, "CarPlayMenu: HUD: cluster layout 6WB (%s): texts ISO-8859-15, outlines%s", why,
+             g_mapKnown ? ", the set-up's handles" : "; area 0x17, texts 0x1a-0x1c, picture 0x1f/0x20");
     g_log(m);
   }
 }
@@ -1091,14 +1463,91 @@ void detectLayout() {
   if (g_size1f && !g_size5)
     use6wb("ImageGetSize");
   else if (g_log)
-    g_log(g_size5 ? "CarPlayMenu: HUD: cluster layout 6WA (picture 5/6)"
-                  : "CarPlayMenu: HUD: cluster layout not answered: the 6WA profile; the BMW navigation's handles decide later");
+    g_log(g_size5 ? "CarPlayMenu: HUD: cluster layout 6WA" : "CarPlayMenu: HUD: cluster layout not answered: the 6WA profile");
+}
+// The picture box from the buffer's own size (ghackt's rule, issues #9 and #12): a buffer smaller than the 6WA box gets a square of
+// 25/36 of its shorter side (at most 100), centred across, two thirds down the room left. 120 x 72 gives (35,15)-(85,65), the F54's
+// MINI box, drawn as before; a buffer that holds the 6WA box gets the 6WA box. 0 x 0 is what the F54 answers for a handle that is
+// no instance (2026-11-13): nothing changes (ghackt took it for the MINI box on the F25 X3, untried there).
+// The divisions are by constants (no division helper on QNX).
+void fitBox(u32 w, u32 h) {
+  char m[160];
+  if (!w && !h) {  // not (yet) an instance: asked again after the navigation's set-up; on an F25 X3 without it, hud_box mini
+    if (g_log)
+      g_log("CarPlayMenu: HUD: the picture buffer is 0 x 0 (not created, or not a picture here): the box stays");
+    return;
+  }
+  if (w < 24 || h < 24 || w > 1023 || h > 1023) {
+    logf1("CarPlayMenu: HUD: picture buffer %u x %u: not used, the box stays", w, h);
+    return;
+  }
+  if (w >= 170 && h >= 120) {
+    logf1("CarPlayMenu: HUD: picture buffer %u x %u holds the 6WA box", w, h);
+    g_boxMode = kBox6wa;
+    return;
+  }
+  u32 sd = (w < h ? w : h) * 25 / 36;
+  if (sd > 100)
+    sd = 100;
+  int x = (int)((w - sd) / 2), y = (int)((h - sd + 1) * 2 / 3);
+  if (x == 35 && y == 15 && sd == 50)
+    g_boxMode = kBoxMini;
+  else {
+    Box b = { x, y, x + (int)sd, y + (int)sd };
+    g_box = b;
+    g_boxMode = kBoxFit;
+  }
+  snprintf(m, sizeof m, "fitted to the picture buffer, %u x %u", w, h);
+  logBox(m);
+}
+// ImageGetSize on the picture buffer, in the F54's form [handle] and the 6WB's [handle][01] (a cluster refuses the form it does not
+// take); 2 s for an answer. A switch's box and the 6WB plane stay as they are.
+void measureBox() {
+  g_measureDue = false;
+  g_askH = hBufA;
+  g_askOk = 0;
+  g_askErr = 0;
+  const u8 f1[] = { (u8)(hBufA >> 8), (u8)hBufA }, f2[] = { (u8)(hBufA >> 8), (u8)hBufA, 1 };
+  call(0xC04, f1, 2);
+  call(0xC04, f2, 3);
+  for (int i = 0; i < 40 && !g_askOk && g_askErr < 2; i++)
+    usleep(50000);
+  if (!g_askOk) {
+    logf1(g_askErr ? "CarPlayMenu: HUD: the picture buffer %u's size was refused: the box stays (hud_box sets one)"
+                   : "CarPlayMenu: HUD: no answer for the picture buffer %u's size: the box stays (hud_box sets one)",
+          hBufA);
+    return;
+  }
+  logf1("CarPlayMenu: HUD: picture buffer %u is %u x %u", hBufA, g_askW, g_askHt);
+  if (g_boxFixed || g_6wb)
+    return;
+  fitBox(g_askW, g_askHt);
+}
+// the maps kept from an earlier start (also for the installer's clear of a left-over arrow, probe.cpp)
+void loadKept() {
+  hudh::Map m;
+  int me = slotOf(g_inst);
+  for (int sl = 0; sl < 2; sl++)
+    if (!g_learnt[sl] && loadMap(sl, m)) {
+      if (sl == me)
+        useMap(m, "kept from an earlier start");
+      else
+        useMirrorMap(m, "kept from an earlier start");
+    }
+  if (!g_mapKnown)
+    textOverride();
+}
+// once the terminal is known: the kept maps, the layout (the picture box follows in the worker)
+void initTerminal() {
+  loadKept();
+  detectLayout();
 }
 
 void *worker(void *) {
   u32 lastLog = 0;
   bool probed = false;
   u32 dbgTick = 0;
+  int lastNight = -1;
   bool kombi = kombiOnly();
   if (kombi && g_log)
     g_log("CarPlayMenu: HUD: cluster 'kombi': the directions go to the KOMBI from librghook-kombi.so, nothing drawn on MOST");
@@ -1112,7 +1561,15 @@ void *worker(void *) {
       continue;
     if (!probed) {
       probed = true;
-      detectLayout();
+      initTerminal();
+    }
+    takeLearnt();  // the navigation's set-up, if it came since
+    if (g_measureDue && !g_shown && !(g_navMs && nowMs() - g_navMs < 5000))
+      measureBox();
+    if (g_night != lastNight) {  // day / night: an effect on show is drawn again in its colour
+      lastNight = g_night;
+      g_level = ~0u;
+      g_blinking = false;
     }
     if (++dbgTick % 10 == 1) {  // about every 5 s: the menu's "HUD debug log"
       int f = open("/var/opt/hmi/data/rw/carplaymenu/hud_debug", 0);
@@ -1122,17 +1579,24 @@ void *worker(void *) {
       if (on && !g_hudDebug) {
         g_dbg = 0;  // the next 600 HUDTerminal lines go to the log
         g_hudDebug = on;
-        probeNames();
-        char m[200];
-        snprintf(m, sizeof m, "CarPlayMenu: HUD: debug log on: layout %s, HUDTerminal at %04x, %u calls sent, %u answered, size 0x1f %u / 5 %u",
-                 g_6wb ? "6WB" : g_boxMini ? "6WA (MINI box)" : "6WA", g_host, g_sent, g_answers, g_size1f, g_size5);
+        char m[240];
+        snprintf(
+            m, sizeof m,
+            "CarPlayMenu: HUD: debug log on: layout %s, box %d, drawing on 82/%02x at %04x (82/00 %04x, 82/02 %04x, copies %d), "
+            "%u calls sent, %u answered, size 0x1f %u / 5 %u, night %d",
+            g_6wb ? "6WB" : "6WA", g_boxMode, g_inst, g_host, g_hostOf[0], g_hostOf[1], g_mirror, g_sent, g_answers, g_size1f,
+            g_size5, g_night);
         if (g_log)
           g_log(m);
+        hudh::Map cur = { hFrame, hStreet, hDist, hUnit, hBufA, hBufB, hBar };
+        logMap("handles", cur, g_mapKnown ? "from a set-up" : "the profile's");
+        if (g_mmapKnown)
+          logMap("copies' handles", g_mmap, "from a set-up");
       } else if (!on && g_hudDebug && g_log)
         g_log("CarPlayMenu: HUD: debug log off");
       g_hudDebug = on;
     }
-    if (g_seen6wb && !g_6wb && !g_shown)  // the BMW navigation drew on 6WB handles: this cluster is a 6WB
+    if (g_seen6wb && !g_6wb && !g_shown && !g_mapKnown)  // the BMW navigation drew on 6WB handles: this cluster is a 6WB
       use6wb("the BMW navigation draws on 0x18..0x35");
     bool nav = g_navMs && nowMs() - g_navMs < 5000;  // the BMW navigation uses the terminal: it has priority
     if (nav) {
@@ -1203,6 +1667,8 @@ void *worker(void *) {
         g_blinking = false;
       }
       g_level = level;
+      if (newMan && (first || verbose()) && !g.road[0] && g_log)
+        g_log("CarPlayMenu: HUD: no street from the iPhone (maneuver_road and current_road empty)");
       if (newMan && (first || verbose()))
         logf1("CarPlayMenu: HUD: maneuver %u type %u, %u m", g.index, g.type, g.dist);
       else if (!newMan && verbose())

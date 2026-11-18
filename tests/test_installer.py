@@ -131,6 +131,8 @@ class Base(object):
                   'esac; done\n'
                   'cmd=$(printf "%s" "$cmd" | sed "s#/bin/ksh#$TEST_SHELL#g; s#/bin/sh #$TEST_SHELL #g; s#/bin/cat#cat#g")\n'
                   'TEST_SYSNAME=QNX; TEST_NODE=${TEST_LAND:-hu-jacinto}; export TEST_SYSNAME TEST_NODE\n'
+                  '[ -z "${TEST_CMDS:-}" ] || printf "%s\\n" "$cmd" >> "$TEST_CMDS"\n'
+                  'case "$cmd" in *"carplay-advanced.sh restart"*) [ -z "${TEST_RESTART_SILENT:-}" ] || exec sleep 30 ;; esac\n'
                   'exec sh -c "$cmd"')
         self.stub('pidin', 'if [ "$1" = -p ]; then\n'
                   '  echo "pid euid"; echo "$2 ${TEST_EUID:-0}"; exit 0\n'
@@ -500,7 +502,7 @@ class InstallTest(Base):
                 'echo "CarPlayMenu: HUD in   0101>2003 fkt c04 op d len 6: 00 05 00 78 00 48"\n'
                 'echo "CarPlayMenu: HUD in   0101>2003 fkt c04 op d len 6: 00 18 00 00 00 00"\n'
                 'echo "CarPlayMenu: HUD in   0101>2003 fkt c04 op d len 7: 00 1f 01 00 dd 00 9e"\n'
-                'echo "CarPlayMenu: HUD in   0101>2003 fkt 201 op d len 4: 00 00 00 1f"\n'
+                'echo "CarPlayMenu: HUD seen 0101>201f fkt 22b op d len 7: 00 01 00 05 01 00 04"\n'
                 '} >> "$1/carplaymenu.log"; exit 0; fi; sleep 0.2; done\n')
         (self.root / 'fake.sh').write_text(fake)
         bg = subprocess.Popen(['/bin/sh', str(self.root / 'fake.sh'), str(shm)])
@@ -509,7 +511,7 @@ class InstallTest(Base):
         self.assertIn('0x0005: 120 x 72 (F54 form)', out)
         self.assertIn('0x001f: 221 x 158 (6WB form)', out)
         self.assertNotIn('0x0018', out)                                               # 0 x 0: no such surface
-        self.assertIn('fkt 201 op d len 4: 00 00 00 1f', out)
+        self.assertIn('fkt 22b op d len 7: 00 01 00 05 01 00 04', out)
         self.assertTrue((self.p['SETTINGS'] / 'hud_debug').exists())
 
     def test_hud_probe_step_draws_a_test_picture(self):
@@ -808,12 +810,27 @@ class FromComputerTest(Base):
         # the next run copies the installed plugin first; the plugin's own links are named, not copied
         self.computer('uninstall')
         self.computer('install', '--hud')
-        out = self.computer('install')                                                 # (a second --hud on top of one stops at the link)
+        out = self.computer('install')
         pre = sorted((self.root / 'BACKUP').glob('*-install-before'))[-1]
         manifest = (pre / 'manifest.txt').read_text()
         self.assertIn('folder  %s' % self.p['PLUGIN'], manifest)
         self.assertIn('link    %s' % self.p['MMIPOD'], manifest)
         self.assertTrue((pre / ('folders' + str(self.p['SETTINGS'])) / 'bin' / 'mm-ipod').is_file())   # its original
+
+    def test_second_hud_install_on_top_of_one(self):
+        # a second --hud on top of one stopped at "mm-ipod is missing or already a link" (issue #9): the wrapper now gets the
+        # original the first install kept
+        original = self.p['MMIPOD'].read_bytes()
+        self.computer('install', '--hud')
+        self.assertTrue(self.p['MMIPOD'].is_symlink())
+        out = self.computer('install', '--hud')
+        self.assertNotIn('missing or already a link', out)
+        self.assertIn('the wrapper gets the kept original', out)
+        self.assertIn('Done: CarPlay Advanced Settings is installed', out)
+        self.assertTrue(self.p['MMIPOD'].is_symlink())
+        self.assertEqual((self.p['SETTINGS'] / 'bin' / 'mm-ipod').read_bytes(), original)
+        self.computer('uninstall')
+        self.assertFalse(self.p['MMIPOD'].is_symlink())
 
     def test_failed_copy_stops_before_the_upload(self):
         (self.root / 'BACKUP').write_text('not a folder')
@@ -848,6 +865,46 @@ class FromComputerTest(Base):
         out = self.computer('install', '--restart-hmi', TEST_HMI_SLEEP='60')
         self.assertLess(time.monotonic() - t0, 40)
         self.assertIn('The head unit is restarting', out)
+
+    def test_restart_after_install_runs_the_uploaded_script(self):
+        # the restart after an install runs the uploaded script, never a script streamed into "/bin/sh -s" (QNX's sh reads a pipe
+        # one byte at a time, a round trip each through on -f: issue #12, BMW F31, never reached the reboot)
+        cmds = self.root / 'cmds'
+        for extra in (('--restart-hmi',), ('--hud', '--restart-hmi')):
+            with self.subTest(extra=extra):
+                if cmds.exists():
+                    cmds.unlink()
+                if extra[0] == '--hud':
+                    self.computer('uninstall')
+                out = self.computer('install', *extra, TEST_CMDS=str(cmds))
+                self.assertIn('The head unit is restarting', out)
+                run = cmds.read_text().splitlines()
+                self.assertFalse([c for c in run if ' -s ' in c or c.endswith(' -s')], run)
+                restart = [c for c in run if c.endswith('carplay-advanced.sh restart')]
+                self.assertEqual(len(restart), 1, run)
+                self.assertIn(str(self.p['STAGE']), restart[0])
+                self.assertIn('appreset', ' '.join(self.calls()))
+
+    def test_unconfirmed_restart_is_a_note_not_an_error(self):
+        self.script.write_text(self.script.read_text().replace('REBOOT_CONFIRM_S=75', 'REBOOT_CONFIRM_S=2'))
+        out = self.computer('install', '--restart-hmi', rc=3, TEST_RESTART_SILENT='1')
+        self.assertIn('did not confirm the restart in 2 s', out)
+        self.assertIn('What was installed is complete', out)
+        self.assertIn('sh carplay-advanced.sh restart', out)
+        self.assertNotIn('ERROR', out)
+        self.assertTrue(any((self.root / 'BACKUP').glob('*-install/COMMITTED')))
+
+    def test_known_build_mapped_by_hand(self):
+        # a known build the HMI scan's patterns do not cover, without Full-screen CarPlay (as ID5_1607-490-1610T Build 153)
+        s = self.script.read_text()
+        start = s.index("supported_table() {\n    cat <<'EOF'\n") + len("supported_table() {\n    cat <<'EOF'\n")
+        self.script.write_text(s[:start] + 'TEST_006 scan none\nTEST_006 fullscreen none\n' + s[start:])
+        out = self.computer('install')
+        self.assertIn('Supported software: TEST_006', out)
+        self.assertIn("TEST_006 was mapped by hand (the HMI scan's patterns do not cover it)", out)
+        self.assertIn('TEST_006 has no Full-screen CarPlay yet', out)
+        self.assertNotIn('does not agree with the built-in table', out)               # no request for a report
+        self.assertIn('Done: CarPlay Advanced Settings is installed', out)
 
     def test_plugin_checked_before_connecting(self):
         (self.pl / 'librghook.so').write_bytes(elf(machine=3))                       # x86
