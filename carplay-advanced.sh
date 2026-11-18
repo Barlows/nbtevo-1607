@@ -26,7 +26,7 @@ LC_ALL=C
 export LC_ALL
 umask 022
 
-VERSION=1.1.1
+VERSION=1.3.0
 REMOTE_NODE=/net/hu-omap
 STAGE=/fs/sda1/opt/carplay-advanced-upload            # upload folder on hu-omap (runs from a computer), removed afterwards
 SSH_HOST=root@169.254.199.99                          # the head unit over ENET (sshd on hu-jacinto)
@@ -417,7 +417,7 @@ restart_unit() {
 
 usage() {
     cat <<'EOF'
-CarPlay Advanced Settings installer 1.1.1 (NBT Evo iDrive 5 / iDrive 6)
+CarPlay Advanced Settings installer 1.3.0 (NBT Evo iDrive 5 / iDrive 6)
 Usage: sh carplay-advanced.sh install|uninstall|status|restart|hud-probe [options]
   hud-probe             Ask the cluster / HUD what it has (about 40 s, nothing installed or changed): the plugin's HUD state,
                         the HUDTerminal instances, the surfaces and their sizes, the navigation's instance names. Then, on a

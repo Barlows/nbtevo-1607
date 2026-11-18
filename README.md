@@ -223,6 +223,11 @@ such agents as much as for people, and `.claude/skills/` holds two task guides t
   [JayJay3071/nbt-android-auto](https://github.com/JayJay3071/nbt-android-auto),
   [luka-dev/mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) and [f-io/LIVI](https://github.com/f-io/LIVI):
   findings and formats that helped (AGENTS.md, References).
+- **Contributors**: [ghackt](https://github.com/ghackt) (the 1.2.x fixes from the issues, ported into 1.3.0: the 1607 build, the
+  exit number, the start marker after a reroute, the KOMBI street length, the second `--hud` install, the restart after install),
+  [FreZZZeR](https://github.com/FreZZZeR) (`hud_box` / `hud_hide`, PR #13), and the owners who tested in their cars and sent logs,
+  handle maps and files: cfrogjump (F25), mrmilankd (F31), judirado-byte (F32), Barlows (F20), itstheodor (F36), tangshijiao and
+  Sir-Gordon (6WB), ONSS12.
 
 ## Feedback
 
