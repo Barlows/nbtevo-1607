@@ -1,3 +1,19 @@
+> ## Personal build for one car - not a general release
+>
+> This repository is a fork of [nbtevo-carplay-advanced](https://github.com/st1ng/nbtevo-carplay-advanced) kept for
+> **one specific car**: a BMW F20 whose head unit reports **`NBTevo_ID5_1607_Release ID5_1607-490-1610T Build 153`**
+> (iDrive 5, 8.8" 1280 x 480), with CarPlay active.
+>
+> It combines ghackt's 1.4.6 tree, the 1607 full-screen layout patch from
+> [PR #18](https://github.com/st1ng/nbtevo-carplay-advanced/pull/18), and payloads for a personal Android installer
+> that updates NBT-AAD as well.
+>
+> The releases here exist **only** to make installing on that one car repeatable. They are not tested on any other
+> head unit, not a supported product, and not affiliated with the upstream authors. **For any other car use the
+> upstream project**, and [NBT-AAD](https://github.com/Sq00ky/Supra-iDrive6-Android-Auto) for Android Auto.
+>
+> Installing modifies the head unit. Do it at your own risk, on a car you own.
+
 # nbtevo-carplay-advanced
 
 Apple CarPlay add-ons for the BMW / MINI **NBT Evo** head unit (iDrive 5 and iDrive 6): a **CarPlay Advanced Settings** menu in
