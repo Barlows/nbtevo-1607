@@ -69,7 +69,13 @@ int main(int argc, char **argv) {
       for (unsigned i = 0; i < m.lanes.n; i++) printf(" %d:%d", m.lanes.kind[i], m.lanes.arrow[i]);
       printf("\n"); fflush(stdout);
     }
-    else if (!strncmp(line, "roadmax ", 8)) { kombi::g_roadMax = (unsigned)atoi(line + 8); printf("ROADMAX ok\n"); fflush(stdout); }
+    else if (!strncmp(line, "roadmax ", 8)) { kombi::g_roadDigits = (unsigned)atoi(line + 8); printf("ROADMAX ok\n"); fflush(stdout); }
+    else if (!strncmp(line, "ruler ", 6)) { kombi::g_ruler = atoi(line + 6) != 0; printf("RULER ok\n"); fflush(stdout); }
+    else if (!strncmp(line, "width ", 6)) { printf("WIDTH %u %u\n", kombi::textW(line + 6, (unsigned)strlen(line + 6)), kombi::roadWidth()); fflush(stdout); }
+    else if (!strncmp(line, "fit ", 4)) {   // fit <width>|<street>: kombi::fitRoad into <width> (1/1000 em)
+      char *bar = strchr(line + 4, '|'), r[96];
+      if (bar) { *bar = 0; kombi::fitRoad(bar + 1, r, sizeof r, (unsigned)atoi(line + 4)); printf("FIT [%s]\n", r); fflush(stdout); }
+    }
     else if (!strncmp(line, "unit ", 5)) {
       unsigned u; char t[8] = ""; sscanf(line + 5, "%u %7s", &u, t); printf("UNIT %d %d\n", kombi::unitOf(u), kombi::unitOfText(t)); fflush(stdout);
     }
@@ -139,6 +145,10 @@ class FakeKombi(object):
         return r
 
     def close(self):
+        try:                    # Linux: a close() alone leaves the socket listening while serve() waits in accept()
+            self.srv.shutdown(socket.SHUT_RDWR)
+        except OSError:         # the Mac: no shutdown on a listening socket (its close() ends the accept)
+            pass
         self.srv.close()
 
 
@@ -297,6 +307,32 @@ class KombiTest(Harness, unittest.TestCase):
         self.assertIn(0x10, [r['method'] for r in reqs])
         self.assertLess(len(reqs), 20)
 
+    def test_lane_row_steady(self):
+        """1.3.1: a lane row that drops out for a moment stays, and one seen on a single tick is not sent"""
+        lanes = '2:6,1:1,1:1'
+        self.tick(d=2, lanes=lanes, metres=300, now=1000)
+        self.assertIn(0x10, [r['method'] for r in self.k.take()])
+        self.tick(d=2, lanes='', metres=300, now=5000)                   # gone (the lane index moved on before its lane set)
+        self.tick(d=2, lanes='', metres=300, now=6000)
+        self.tick(d=2, lanes=lanes, metres=300, now=6500)                # back within 2.5 s: nothing was sent
+        self.assertEqual(self.k.take(), [])
+        self.tick(d=2, lanes='1:6,2:1,2:1', metres=300, now=10000)       # another row on one tick only
+        self.tick(d=2, lanes=lanes, metres=300, now=10500)
+        self.assertEqual(self.k.take(), [])
+        self.tick(d=2, lanes='', metres=300, now=11000)                  # gone for good: taken away after 2.5 s
+        self.tick(d=2, lanes='', metres=300, now=12000)
+        self.assertEqual(self.k.take(), [])
+        self.tick(d=2, lanes='', metres=300, now=13600)
+        reqs = self.k.take()
+        self.assertTrue(reqs)
+        self.assertLess(len(reqs), 20)                                   # the in-place update, not the whole graph
+        self.tick(d=2, lanes=lanes, metres=300, now=20000)               # a new row: sent on its second tick
+        self.assertEqual(self.k.take(), [])
+        self.tick(d=2, lanes=lanes, metres=300, now=20500)
+        self.assertIn(0x10, [r['method'] for r in self.k.take()])
+        self.tick(d=7, lanes='', metres=300, now=21000)                  # a new maneuver takes no row from the last one
+        self.assertNotIn(0x10, [r['method'] for r in self.k.take() if self.fields(r)['index'] == 0])
+
     def test_rejection_stops_the_output(self):
         self.k.reject.add(0x3)
         st, logs = self.tick()
@@ -371,27 +407,107 @@ class ManTest(Harness, unittest.TestCase):
         self.assertEqual(self.man('2 0 0 300 2 300 m|A1|0/1000/-90;1/1000/0;2/90/0,90'), '7 3 [300] [A1] 3 2:6 1:1 1:7')
         self.assertEqual(self.man('2 0 0 300 2 300 m|A1|1/1000/'), '7 3 [300] [A1] 0')       # a lane with no direction: no row
 
+    def width(self, text):
+        w, field = self.cmd('width ' + text, 'WIDTH')[0].split()
+        return int(w), int(field)
+
+    def fit(self, width, street):
+        return self.cmd('fit %d|%s' % (width, street), 'FIT')[0][1:-1]
+
+    def test_width_model(self):
+        # Helvetica's advance widths (1/1000 em): digits 556, "i" 222, "W" 944, other letters 600; the field 14 digits less half a digit
+        self.assertEqual(self.width('1234567890'), (5560, 14 * 556 - 278))
+        self.assertEqual(self.width('iiii')[0], 888)
+        self.assertEqual(self.width('WWWW')[0], 3776)
+        self.assertEqual(self.width('Main Street')[0], 5113)
+        self.assertEqual(self.width('Großherzog')[0], 5324)
+        self.assertEqual(self.width('Exit 104  Main Street')[0], 9282)                  # 16.7 digits: 1.3.3 sent it, the HUD cut it
+
     def test_street_fits(self):
-        # 22 characters by default (the windscreen HUD's font): a name that fits stays as it is
+        # by width, not by count: a name that fits stays as the iPhone wrote it (21 narrow characters), a wider one (20 capitals) does not
         self.assertEqual(self.man('1 0 0 450 2 450 m|Main Street|'), '6 3 [450] [Main Street] 0')
-        self.assertEqual(self.man('1 0 0 450 2 450 m|Twenty-Two Characters!|'), '6 3 [450] [Twenty-Two Characters!] 0')
-        # longer: short forms, then trailing words dropped, then one word cut at a character (UTF-8)
-        self.assertEqual(self.man('1 0 0 450 2 450 m|North Martin Luther King Junior Boulevard|'),
-                         '6 3 [450] [N Martin Luther King] 0')
-        self.assertEqual(self.man('1 0 0 450 2 450 m|Fifth Avenue South Westbound|'), '6 3 [450] [Fifth Ave S WB] 0')
-        self.assertEqual(self.man('1 0 0 450 2 450 m|Großherzog-Friedrich-Straße Nord|'), '6 3 [450] [Großherzog-Friedrich-S] 0')
-        self.cmd('roadmax 45', 'ROADMAX')                                                      # kombi_road_max
+        self.assertEqual(self.man('1 0 0 450 2 450 m|Little Illinois Trail|'), '6 3 [450] [Little Illinois Trail] 0')
+        self.assertEqual(self.man('1 0 0 450 2 450 m|US HIGHWAY 101 NORTH|'), '6 3 [450] [US HWY 101 N] 0')
+        # USPS: the suffix and the directions; then Mount / Fort / Point / Saint; then trailing words; then one word cut (UTF-8)
+        self.assertEqual(self.man('1 0 0 450 2 450 m|Fifth Avenue South Westbound|'), '6 3 [450] [Fifth AVE S WB] 0')
+        self.assertEqual(self.man('1 0 0 450 2 450 m|Jefferson Davis Highway|'), '6 3 [450] [Jefferson Davis] 0')
+        self.assertEqual(self.man('1 0 0 450 2 450 m|North Martin Luther King Junior Boulevard|'), '6 3 [450] [N Martin Luther] 0')
+        self.assertEqual(self.man('1 0 0 450 2 450 m|Großherzog-Friedrich-Straße Nord|'), '6 3 [450] [Großherzog-Frie] 0')
+        self.assertEqual(self.fit(6000, 'Highway 101'), 'Highway 101')                    # fits (5780)
+        self.assertEqual(self.fit(4500, 'Highway 101'), 'HWY 101')                        # the suffix before a number
+        self.assertEqual(self.fit(3000, 'I-95 North'), 'I-95 N')                          # a direction after a route
+        self.assertEqual(self.fit(5000, 'North Avenue'), 'North AVE')                     # the direction is the name: it stays...
+        self.assertEqual(self.fit(3700, 'North Avenue'), 'N AVE')                         # ...unless nothing else fits
+        self.assertEqual(self.fit(6000, 'Mount Vernon Highway'), 'MT Vernon')
+        self.assertEqual(self.fit(9500, 'Saint Charles Avenue South'), 'Saint Charles AVE S')   # stage 1 is enough
+        self.assertEqual(self.fit(8500, 'Saint Charles Avenue South'), 'St Charles AVE S')
+        self.assertEqual(self.fit(4500, 'North Kalanianaole Highway'), 'N Kalania')       # never just "N"
+        self.assertEqual(self.fit(9000, 'Spring Garden Street'), 'Spring Garden ST')     # name words stay whole
+        self.cmd('roadmax 45', 'ROADMAX')                                                      # kombi_road_max: 45 digits
         self.assertEqual(self.man('1 0 0 450 2 450 m|North Martin Luther King Junior Boulevard|'),
                          '6 3 [450] [North Martin Luther King Junior Boulevard] 0')
         self.cmd('roadmax 0', 'ROADMAX')
 
+    # The list ghackt sent for 1.3.5 (USPS Publication 28), as sent: duplicates included
+    USPS = ('Avenue=AVE Boulevard=BLVD Circle=CIR Court=CT Drive=DR Lane=LN Place=PL Road=RD Square=SQ Street=ST Terrace=TER Way=WAY '
+            'Alley=ALY Beach=BCH Bend=BND Bluff=BLF Bottom=BTM Bridge=BRG Brook=BRK Burg=BG Bypass=BYP Causeway=CSWY Center=CTR '
+            'Canyon=CYN Cape=CPE Crossing=XING Crest=CRST Creek=CRK Crescent=CRES Dale=DL Dam=DM Divide=DV Estate=EST '
+            'Expressway=EXPY Extension=EXT Falls=FLS Ferry=FRY Field=FLD Fort=FT Freeway=FWY Garden=GDN Gateway=GTWY Glen=GLN '
+            'Grove=GRV Harbor=HBR Heights=HTS Highway=HWY Hill=HL Hollow=HOLW Inlet=INLT Island=IS Junction=JCT Key=KY Knoll=KNL '
+            'Lake=LK Landing=LNDG Light=LGT Lock=LCK Loop=LOOP Mall=MALL Manor=MNR Meadow=MDW Mill=ML Mission=MSN Mount=MT '
+            'Mountain=MTN Neck=NCK Orchard=ORCH Oval=OVAL Park=PARK Parkway=PKWY Point=PT Port=PRT Prairie=PR Ranch=RNCH '
+            'Rapids=RPDS Rest=RST Ridge=RDG River=RIV Road=RD Row=ROW Run=RUN Shoal=SHL Shore=SHR Spring=SPG Springs=SPGS Spur=SPUR '
+            'Square=SQ Station=STA Stravenue=STRA Stream=STRM Street=ST Summit=SMT Terrace=TER Trace=TRCE Trail=TRL Trailer=TRLR '
+            'Tunnel=TNL')
+
+    def test_usps_suffixes(self):
+        # every pair as a street's suffix, in a field just wide enough for its short form: the short form, unless it is no narrower
+        # than the word in the HUD's font (PRT, CRST, INLT, TRCE and HOLW; WAY, LOOP, ... are the word itself): then the word stays
+        kept = []
+        for pair in self.USPS.split():
+            full, short = pair.split('=')
+            for word in (full, full.upper()):                                                # any case
+                narrower = self.width(short)[0] < self.width(word)[0]
+                got = self.fit(self.width('Oak ' + short)[0], 'Oak ' + word)
+                self.assertEqual(got, 'Oak ' + (short if narrower else word), word)
+            if not self.width(short)[0] < self.width(full)[0]:
+                kept.append(full)
+        self.assertEqual(kept, ['Way', 'Crest', 'Hollow', 'Inlet', 'Loop', 'Mall', 'Oval', 'Park', 'Port', 'Row', 'Run', 'Spur',
+                                'Trace'])
+        self.assertEqual(self.fit(3000, 'Oak Port'), 'Oak')                               # a word that stays is dropped, not widened
+        self.assertEqual(self.fit(5000, 'Bay Port North'), 'Bay Port N')                  # "Bay PRT N" would be 5001 wide
+
     def test_exit_number(self):
-        # a highway exit: its number in front of the road; other maneuvers ignore it
-        self.assertEqual(self.man('x:23B 23 0 0 800 2 800 m|I-95 North|'), '29 3 [800] [Exit 23B  I-95 North] 0')
+        # an exit: its number in front of the road, whole; the road fitted into the width left; other maneuvers ignore the number
+        self.assertEqual(self.man('x:23B 23 0 0 800 2 800 m|I-95 North|'), '29 3 [800] [Exit 23B  I-95 N] 0')
         self.assertEqual(self.man('x:23B 8 -30 0 800 2 800 m|I-95|'), '28 3 [800] [Exit 23B  I-95] 0')
         self.assertEqual(self.man('x:23B fb 23 0 0 800 2 800 m|Interstate 95|'), '29 3 [800] [Exit 23B] 0')  # the current road
         self.assertEqual(self.man('x:23B 23 0 0 800 2 800 m||'), '29 3 [800] [Exit 23B] 0')
         self.assertEqual(self.man('x:12 1 0 0 800 2 800 m|Main Street|'), '6 3 [800] [Main Street] 0')
+        # 1.3.3's cut-off lines (ghackt, J29): now within the field, the exit number kept
+        self.assertEqual(self.man('x:104 23 0 0 800 2 800 m|Main Street|'), '29 3 [800] [Exit 104  Main] 0')
+        self.assertEqual(self.man('x:104 23 0 0 800 2 800 m|Jefferson Davis Highway|'), '29 3 [800] [Exit 104  Jeffers] 0')
+        for line in ('x:104 23 0 0 800 2 800 m|Jefferson Davis Highway|', 'x:104 23 0 0 800 2 800 m|Main Street|'):
+            road = self.man(line).split('[')[2].split(']')[0]
+            self.assertLessEqual(self.width(road)[0], self.width(road)[1], road)
+        # exits off other roads: keep right (14), slight left (49), a highway change (53) with an exit number
+        self.assertEqual(self.man('x:104 14 0 0 800 2 800 m|I-95 North|'), '3 3 [800] [Exit 104  I-95 N] 0')
+        self.assertEqual(self.man('x:5 49 0 0 800 2 800 m|Route 9|'), '2 3 [800] [Exit 5  Route 9] 0')
+        self.assertEqual(self.man('x:23B 53 0 0 800 2 800 m|I-95 North|'), '33 3 [800] [Exit 23B  I-95 N] 0')
+        self.assertEqual(self.man('x:2 6 0 0 800 2 800 m|Main Street|'), '15 3 [800] [Main Street] 0')   # a roundabout: no
+        # a wider field (kombi_road_max 16): the road's suffix shortened after the number
+        self.cmd('roadmax 16', 'ROADMAX')
+        self.assertEqual(self.man('x:104 23 0 0 800 2 800 m|Main Street|'), '29 3 [800] [Exit 104  Main ST] 0')
+        self.cmd('roadmax 0', 'ROADMAX')
+
+    def test_ruler(self):
+        # kombi_road_ruler: 40 digits instead of every street, exits too, to count the ones the HUD shows whole
+        self.cmd('ruler 1', 'RULER')
+        row = '1234567890' * 4
+        self.assertEqual(self.man('1 0 0 450 2 450 m|Main Street|'), '6 3 [450] [%s] 0' % row)
+        self.assertEqual(self.man('x:104 23 0 0 800 2 800 m|Main Street|'), '29 3 [800] [%s] 0' % row)
+        self.cmd('ruler 0', 'RULER')
+        self.assertEqual(self.man('1 0 0 450 2 450 m|Main Street|'), '6 3 [450] [Main Street] 0')
 
 
 class ProbeTest(unittest.TestCase):

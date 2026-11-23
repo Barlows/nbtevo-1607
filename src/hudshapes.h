@@ -981,4 +981,25 @@ inline u32 toBoxPoly(Pt *p, u32 k, const Box &b) {
   return tidy(p, k);
 }
 
+// The 6WB cluster (BMW F-series digital cluster): the picture goes into its junction-view plane, instances 0x1F/0x20, 221 x 158, drawn
+// in perspective (narrower at the top; JayJay3071/nbt-android-auto, docs/CLUSTER-HUDTERMINAL.md, car 2026-11-08). Their car-verified
+// arrows sit in about x 66..166, y 18..140 with the vertical stretched 1.5x against the perspective: the 6WA box is mapped to
+// (66,18)-(166,143), x 1:1 and y 5/4. A linear map with positive scales keeps a convex piece convex; the hull / tidy only fix rounding.
+const int kWideW = 221, kWideH = 158;
+inline void wideOne(Pt &p) {
+  int x = p.x - 4, y = 18 + (((int)p.y - 20) * 5 >> 2);
+  p.x = (s16)(x < 0 ? 0 : x >= kWideW ? kWideW - 1 : x);
+  p.y = (s16)(y < 0 ? 0 : y >= kWideH ? kWideH - 1 : y);
+}
+inline u32 toWide(Pt *p, u32 k) {
+  for (u32 i = 0; i < k; i++)
+    wideOne(p[i]);
+  return hull(p, k);
+}
+inline u32 toWidePoly(Pt *p, u32 k) {
+  for (u32 i = 0; i < k; i++)
+    wideOne(p[i]);
+  return tidy(p, k);
+}
+
 }  // namespace hud

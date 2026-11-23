@@ -39,6 +39,7 @@ int main(int argc, char **argv) {  // mode in out
   else if (!strcmp(k, "bmw1703")) m = pbw::patchCommon1703(b, n, o);
   else if (!strcmp(k, "bmw1607")) m = pbw::patchCommon1607(b, n, o);
   else if (!strcmp(k, "bmw006")) return pbw::hasFullscreen006(b, n) ? 0 : 3;
+  else if (!strcmp(k, "bmwnamed")) return pbw::hasFullscreenNamed(b, n) ? 0 : 3;
   else if (!strcmp(k, "ini")) m = ini::patch(b, n, o, true, false);
   else if (!strcmp(k, "inibmw")) m = ini::patch(b, n, o, true, false, true);
   else if (!strcmp(k, "conn")) m = ini::patchConn(b, n, o, true, false, 0, false, 0, &w);
@@ -58,10 +59,9 @@ KNOWN = {
     'mini1703': ('e8263cac770e957befea2b3299f01d6f07a5d6c8025e2d53e3f428300037dd9a',
                  '16ec36d9f666ce1956c43a3a4347780bd1711eff5c77fc00092a7c492f1f2bf0'),
     'bmw006': ('e7d86ccb3fa4b72ac190a3d87546807f237cc0e45550de2aeeea2945e5a87250', None),
+    'bmwnamed': ('e860277a07c824355d31b7305c0be953994402372eab69819758458091383656', None),   # 1903-490 Build 41 (issue #10)
     'bmw1703': ('ba7989d773baaa87941e752a94c1d770b68a524cdb8ba0a4b3761fc4ea9cc196',
                 'b9ff4218ba4752286a39bba7e405e21fc1b3b91412c60cdb546fb64d9c487b29'),
-    'bmw1607': ('ee50dd548e2e6b4fc2bd59a77863512ca4e76d4103c42298a753908f38372558',
-                '62ba4c592bba9472cf611eb556dffc4197ba8e90b6b8fc376947cc4ed6efe078'),
 }
 
 
@@ -162,23 +162,6 @@ def bmw_carplay_1703(slot_w=None, panel_x=None):
     return state('LT_State_CarPlay', ld(4, ld(1, ld(2, b'spec') + ld(2, slot + panel))))
 
 
-# the older common layout (HMI ID5_1607-490 Build 153): names are numeric indices, the CarPlay state's header is 21238
-def nref(idx, kind=4):          # operand: a name index; kind 0/1 own parameter, 4 constant
-    return ld(1, vi(1, idx)) + ld(2, vi(4, kind))
-
-
-def state_1607(*body, id=21238):
-    return ld(1, ld(1, vi(1, id)) + b''.join(body))
-
-
-def bmw_carplay_1607(slot_w=None, panel_x=None, slot_extra=None):
-    slot_w = lit(900.0) if slot_w is None else slot_w
-    panel_x = nref(19001) if panel_x is None else panel_x
-    slot = vec3(slot_w, nref(17357), slot_extra if slot_extra is not None else nref(8416, 1))
-    panel = vec3(panel_x, lit(0), nref(17263))
-    return state_1607(ld(4, ld(1, ld(2, b'spec') + ld(2, slot + panel))))
-
-
 def other_state_1703():         # another state with the same side-panel position: only the CarPlay state may change
     panel = widget('ContentPreview', vec3(ref('contentPreviewW', 4), ref('defaultD', 4), ref('contentPreviewH', 4)),
                    vec3(ref('smallScreenW', 4), lit(0), ref('contentPreviewMB', 4)))
@@ -208,7 +191,7 @@ class Layout(unittest.TestCase):
         r = subprocess.run([str(self.exe), mode, str(src), str(out)], capture_output=True)
         self.assertIn(r.returncode, (0, 3), r.stderr)
         self.last_stdout = r.stdout.decode().strip()
-        if mode == 'bmw006':
+        if mode in ('bmw006', 'bmwnamed'):
             return r.returncode == 0
         return out.read_bytes() if r.returncode == 0 else None
 
@@ -231,24 +214,48 @@ class Layout(unittest.TestCase):
         self.assertIsNotNone(self.run_h('bmw1703', bmw_carplay_1703()))
         self.assertIsNone(self.run_h('bmw1703', b'\x0a\x05abc'))           # not protobuf
 
+    # ---- 1607-490 Build 153 (BMW F20, issue #8): names as indices ---------------------------------------------------------------
+    @staticmethod
+    def ix(i, kind):                                                    # operand: the name with index i
+        return ld(1, vi(1, i)) + ld(2, vi(4, kind))
+
+    @staticmethod
+    def v3(*ops):
+        return vi(1, 21) + vi(2, 2) + vi(2, 2) + vi(2, 2) + b''.join(ld(3, o) for o in ops)
+
+    def state1607(self, idx=21238, width=900.0, panel=19001, mb=17263):
+        ix, v3 = self.ix, self.v3
+        slot = ld(1, ld(1, vi(1, 21300))) + ld(3, ld(2, ld(5, v3(lit(width), ix(17357, 4), ix(8416, 1))))) + \
+            ld(5, ld(2, ld(5, v3(lit(0), lit(0), lit(0)))))
+        pane = ld(1, ld(1, vi(1, 21301))) + ld(3, ld(2, ld(5, v3(ix(17100, 4), ix(17357, 4), ix(17101, 4))))) + \
+            ld(5, ld(2, ld(5, v3(ix(panel, 4), lit(0), ix(mb, 4)))))
+        return ld(1, ld(1, vi(1, idx)) + ld(2, ld(2, b'tab')) + ld(4, ld(1, ld(2, b'spec') + ld(2, ld(1, slot) + ld(1, pane)))))
+
     def test_bmw1607_synthetic(self):
-        src = state_1607(ld(2, vi(1, 7)), id=21239) + bmw_carplay_1607() + state_1607(ld(2, vi(1, 8)), id=21240)
+        other = self.state1607(idx=21234, width=819.0)                    # A4A's state: another header, another width
+        src = other + self.state1607() + other
         out = self.run_h('bmw1607', src)
-        want = (state_1607(ld(2, vi(1, 7)), id=21239) +
-                bmw_carplay_1607(slot_w=lit(1440.0), panel_x=lit(2000.0)) +
-                state_1607(ld(2, vi(1, 8)), id=21240))
-        self.assertEqual(out, want)
-        self.assertEqual(len(out), len(src) + 1)
+        self.assertEqual(len(out), len(src) + 1)                           # the panel's operand is one byte longer
         decodes_fully(self, out)
-        self.assertIsNone(self.run_h('bmw1607', out))                       # already changed: refused
+        a, b = parse(src), parse(out)
+        self.assertEqual([x for x in a if x != a[1]], [x for x in b if x != b[1]])   # only the CarPlay state changed
+        st = b[1][2]
+        self.assertIn(lit(1440.0), st)
+        self.assertNotIn(lit(900.0), st)
+        self.assertIn(ld(3, lit(2000)) + ld(3, lit(0)) + ld(3, self.ix(17263, 4)), st)
+        self.assertNotIn(self.ix(19001, 4), st)
+        self.assertIsNone(self.run_h('bmw1607', out))                      # already widened: refused
 
     def test_bmw1607_refuses_unexpected(self):
-        self.assertIsNone(self.run_h('bmw1607', state_1607(ld(2, vi(1, 7)), id=21239)))   # no CarPlay state
-        self.assertIsNone(self.run_h('bmw1607', bmw_carplay_1607() * 2))               # two CarPlay states
-        self.assertIsNone(self.run_h('bmw1607', bmw_carplay_1607(slot_w=lit(819.0))))  # the A4A slot
-        self.assertIsNone(self.run_h('bmw1607', bmw_carplay_1607(panel_x=nref(19002))))  # panel elsewhere
-        self.assertIsNone(self.run_h('bmw1607', b'\x0a\x05abc'))                       # not protobuf
-        self.assertIsNotNone(self.run_h('bmw1607', bmw_carplay_1607()))
+        self.assertIsNone(self.run_h('bmw1607', self.state1607(idx=21234, width=819.0)))   # only A4A's slot
+        self.assertIsNone(self.run_h('bmw1607', self.state1607(panel=19002)))               # panel at another index
+        self.assertIsNone(self.run_h('bmw1607', self.state1607(mb=17264)))
+        self.assertIsNone(self.run_h('bmw1607', self.state1607() * 2))                      # two CarPlay states
+        self.assertIsNone(self.run_h('bmw1607', b'\x0a\x05abc'))                            # not protobuf
+        for mode in ('bmw1703', 'mini1703', 'mini006'):
+            self.assertIsNone(self.run_h(mode, self.state1607()), mode)
+        self.assertFalse(self.run_h('bmw006', self.state1607()))
+        self.assertFalse(self.run_h('bmwnamed', self.state1607()))
 
     def test_bmw006_synthetic(self):
         def ix(i, kind):
@@ -260,6 +267,23 @@ class Layout(unittest.TestCase):
         self.assertTrue(self.run_h('bmw006', other + good))
         self.assertFalse(self.run_h('bmw006', other))                       # the slot, but not in LT_State_CarPlay
         self.assertFalse(self.run_h('bmw006', good.replace(ix(4631, 4), ix(4632, 4))))
+
+    def test_bmw_named_synthetic(self):
+        """1903-490 Build 41 (issue #10): string names as in 1703, the slot keyed on IsCarPlayFullscreen as in 006."""
+        def carplay(slot_w):
+            slot = widget('Table', vec3(slot_w, ref('defaultD', 4), ref('eParam_WidgetHeight', 1)), vec3(lit(0), lit(0), lit(0)))
+            return state('LT_State_CarPlay', ld(4, ld(1, ld(2, b'spec') + ld(2, slot))))
+        sel = ld(2, ld(5, vi(1, 18) + vi(2, 11) + vi(2, 2) + vi(2, 2) + ld(3, ref('IsCarPlayFullscreen', 0)) +
+                       ld(3, ref('screenW', 4)) + ld(3, ref('smallScreenW', 4))))
+        good = carplay(sel)
+        self.assertTrue(self.run_h('bmwnamed', other_state_1703() + good))
+        self.assertFalse(self.run_h('bmwnamed', other_state_1703()))                     # no CarPlay state
+        self.assertFalse(self.run_h('bmwnamed', good * 2))                               # two CarPlay states
+        self.assertFalse(self.run_h('bmwnamed', bmw_carplay_1703()))                     # 1703's fixed slot
+        self.assertFalse(self.run_h('bmwnamed', good.replace(b'screenW\x12', b'screenX\x12')))
+        for mode in ('bmw1703', 'mini1703', 'mini006'):
+            self.assertIsNone(self.run_h(mode, good), mode)                              # nothing to write there
+        self.assertFalse(self.run_h('bmw006', good))
 
     def test_ini_synthetic(self):
         sec = lambda o, w, h, mm: ('Option: %s\n###\n[Screen]\nWidth=%d\nHeight=%d\nPhysicalWidth=%d\nPhysicalHeight=78\n'
@@ -324,33 +348,6 @@ class Layout(unittest.TestCase):
         for mode in ('mini006', 'mini1703', 'bmw1703'):
             self.assertIsNone(self.run_h(mode, src), mode)
 
-    def test_real_bmw1607(self):
-        if not LAYOUTS:
-            self.skipTest('CPA_LAYOUTS not set (real layout files)')
-        src = None
-        for p in sorted(LAYOUTS.rglob('Spec_State_Merged.pbw')):
-            if 'common' in p.as_posix():
-                d = p.read_bytes()
-                if hashlib.sha256(d).hexdigest() == KNOWN['bmw1607'][0]:
-                    src = d
-                    break
-        if src is None:
-            self.skipTest('the 1607 common layout is not under CPA_LAYOUTS')
-        out = self.run_h('bmw1607', src)
-        self.assertEqual(len(out), len(src) + 1)
-        decodes_fully(self, out)
-        self.check_known('bmw1607', src, out)
-        a, b = parse(src), parse(out)
-        changed = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
-        self.assertEqual(len(a), len(b) + 1)                                # one byte added (the panel ref -> literal)
-        self.assertEqual(len(changed), 1)                                   # only the CarPlay state
-        self.assertEqual(b[changed[0]][2][:6], ld(1, vi(1, 21238))[:6])     # header: LT_State_CarPlay (21238)
-        st = b[changed[0]][2]
-        self.assertIn(vec3(lit(1440), nref(17357), nref(8416, 1)), st)
-        self.assertIn(vec3(lit(2000), lit(0), nref(17263)), st)
-        self.assertIsNone(self.run_h('bmw1607', out))
-        self.assertIsNone(self.run_h('bmw1703', src))
-
     def test_real_bmw1703(self):
         src = self.find('006_006_006', 'ro/common/widget/generated/Spec_State_Merged.pbw')
         out = self.run_h('bmw1703', src)
@@ -369,6 +366,29 @@ class Layout(unittest.TestCase):
         for mode in ('mini006', 'mini1703'):
             self.assertIsNone(self.run_h(mode, src), mode)
         self.assertFalse(self.run_h('bmw006', src))
+
+    def test_real_bmw1607(self):
+        """<CPA_LAYOUTS>/1607/.../ro/common/widget/generated/Spec_State_Merged.pbw (BMW F20, issue #8): checked in that car."""
+        src = self.find('1607', 'ro/common/widget/generated/Spec_State_Merged.pbw')
+        out = self.run_h('bmw1607', src)
+        self.assertEqual(len(out), len(src) + 1)
+        decodes_fully(self, out)
+        a, b = parse(src), parse(out)
+        self.assertEqual(sum(1 for x, y in zip(a, b) if x != y), 1)
+        if hashlib.sha256(src).hexdigest().startswith('ee50dd54'):         # the car's file (202,554 bytes) -> its copy in the car
+            self.assertTrue(hashlib.sha256(out).hexdigest().startswith('62ba4c59'))
+        self.assertIsNone(self.run_h('bmw1607', out))
+        for mode in ('bmw1703', 'mini006', 'mini1703'):
+            self.assertIsNone(self.run_h(mode, src), mode)
+
+    def test_real_bmw1903(self):
+        """<CPA_LAYOUTS>/1903/.../ro/common/widget/generated/Spec_State_Merged.pbw: the common layout of 1903-490 Build 41."""
+        src = self.find('1903', 'ro/common/widget/generated/Spec_State_Merged.pbw')
+        self.assertTrue(self.run_h('bmwnamed', src))
+        self.check_known('bmwnamed', src, None)
+        self.assertFalse(self.run_h('bmw006', src))
+        for mode in ('bmw1703', 'mini006', 'mini1703'):
+            self.assertIsNone(self.run_h(mode, src), mode)
 
     def test_real_carplay_ini(self):
         src = self.find('006_017_006', 'opt/conn/data/carplay/carplay.ini').decode()

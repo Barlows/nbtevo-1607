@@ -1,8 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Installer for the "CarPlay Advanced Settings" HMI plugin (plugin/) on the NBT Evo, iDrive 5/6, HMI 006_017_006,
-# ID5_1703-490-1650ZD Build 139 or ID5_1607-490-1610T Build 153 (the plugin picks its addresses by build; on 1607 Full-screen
-# CarPlay is for BMW only: its MINI layout has no CarPlay state the plugin can widen).
+# ID5_1703-490-1650ZD Build 139, ID5_1607-490-1610T Build 153 or ID5_1903-490-1837J Build 41 (the plugin picks its addresses by build;
+# on 1607 Full-screen CarPlay is for BMW only: its MINI layout has no CarPlay state the plugin can widen).
 #
 # Run it from a computer (macOS or Linux, POSIX sh + OpenSSH), in the folder with plugin/:
 #     sh carplay-advanced.sh install [--host root@169.254.199.99] [--dry-run] [--restart-hmi]
@@ -26,7 +26,7 @@ LC_ALL=C
 export LC_ALL
 umask 022
 
-VERSION=1.3.0
+VERSION=1.4.6
 REMOTE_NODE=/net/hu-omap
 STAGE=/fs/sda1/opt/carplay-advanced-upload            # upload folder on hu-omap (runs from a computer), removed afterwards
 SSH_HOST=root@169.254.199.99                          # the head unit over ENET (sshd on hu-jacinto)
@@ -108,6 +108,11 @@ fi
 # ---------------------------------------------------------------------------------------------------------------- supported software
 # The plugin patches HmiMain3D's code at fixed addresses and libcppinch.so hooks functions of libconn_carplay.so, so support is decided
 # by the SHA-256 of those two files, not by the build name. A software is supported when every file listed for it matches.
+# 1903-490 Build 41 (issues #9, #10): its scan row is what the scan finds there (hooks and tilts, the same as kBuilds); its
+# CARPLAY_FULLSCREEN flag code is not found by the scan (one read uses another register, window f5) and is in kBuilds (kFsCode1903).
+# 1807-490 Build 29 (BMW F11 retrofit, ghackt/Carplay-advanced-installer issue #2): 006_017_006's code moved by 0x2f28; the scan finds
+# all of it, flag code included. It has no libconn_carplay.so row: that file's hash was not reported (supported_as checks only the
+# rows a build has; libcppinch.so hooks libconn_carplay.so by symbol name, not address). Add the row once `status` prints it.
 # To add one: hash both files on that head unit (sh carplay-advanced.sh status prints them), add the addresses to src/cpm.cpp
 # (kBuilds) and its lines here.
 supported_table() {
@@ -122,7 +127,11 @@ ID5_1703-490-1650ZD_Build_139    scan                28f623d87c3c934d058fb49b1d2
 ID5_1607-490-1610T_Build_153     HmiMain3D           0fa0e6e0de49235c02a8bcebca588dad18bd5eab512066ab44ed295a09ca3fbd
 ID5_1607-490-1610T_Build_153     libconn_carplay.so  bbdbae7df387c448a3eec9dd607f9e7b196b899039a0123e6299d5ad0fa96827
 ID5_1607-490-1610T_Build_153     scan                none
-ID5_1607-490-1610T_Build_153     fullscreen          pbw1607
+ID5_1903-490-1837J_Build_41      HmiMain3D           027cf939eb503cb55048fba575b4155d28acfaec62020d40d6ea1caa3204b8cf
+ID5_1903-490-1837J_Build_41      libconn_carplay.so  062a20f49fc4f4bab1a7e3b9a5910d12ba8e6b70895a434291c20d83ee0a5f85
+ID5_1903-490-1837J_Build_41      scan                4c4996307ff9e38024fb2904a3093124668f198715a68903704453531ec42532
+ID5_1807-490-1809H_Build_29      HmiMain3D           5e74cde50c01dbf9c104188fadf50c6f8642c5d0715038d150d85dda4e2112c7
+ID5_1807-490-1809H_Build_29      scan                634094fde1454b131cf1bfabc8c19fb953ab2af79e9b02fff0e879eff91e7bf8
 EOF
 }
 # supported_as <sha256 of HmiMain3D> <sha256 of libconn_carplay.so>: prints the matching software, nothing if none
@@ -169,11 +178,33 @@ mmipod_known() {    # mmipod_known <sha256>: the builds that have this mm-ipod, 
 is_software_name() {
     supported_table | grep "^$1 " >/dev/null 2>&1
 }
+# HMI builds reported with the turn-by-turn install (--hud, the default on iDrive 6). That install patches no HMI code, so it needs no
+# entry in supported_table: this list only changes what the installer says (a known report instead of a request for one). Keyed by
+# the version line of version.txt; "|" separates the fields. Add a build here from its issue (the version line exactly as printed).
+hud_reports() {
+    cat <<'EOF'
+# HMI version line                                     | car, cluster, where it was reported
+NBTevo_ID5_1903_Release ID5_1903-490-1837J Build 41    | BMW F25 X3, MOST HUDTerminal (6WA), issue #9; BMW F36, 6WB cluster, issue #10
+NBTevo_ID5_2211_Release ID5_2211-490-2222A Build 13    | BMW F30 (2016), iDrive 6, MOST HUDTerminal, issue #11
+NBTevo_ID5_2403_Release ID5_2403-525-2403A Build 1     | BMW F31 (NBTevo_Y24073J), iDrive 6, MOST HUDTerminal, issue #12
+NBTevo_ID5_1807_Release ID5_1807-490-1809H Build 29    | BMW F11 retrofit, 6WB cluster with HUD, MOST HUDTerminal, ghackt/Carplay-advanced-installer issue #2 (a known build since 1.3.7)
+NBTevo_ID5_2207_Release ID5_2207-510-2218A Build 6     | Ethernet KOMBI (G-series / J29), NBT-AAD installed too; installed from the CarPlay Advanced Installer app 1.6.4 (2026-11-19)
+EOF
+}
+hud_reported() {    # hud_reported <HMI version line>: where this build was reported with the turn-by-turn install, or nothing
+    hud_reports | while IFS='|' read -r r_ver r_where; do
+        case "$r_ver" in ''|'#'*) continue ;; esac
+        # the version column is padded with spaces: compare without the trailing ones
+        while :; do case "$r_ver" in *' ') r_ver=${r_ver%' '} ;; *) break ;; esac; done
+        if [ "$r_ver" = "$1" ]; then echo "${r_where# }"; fi
+    done
+}
 
 # ---------------------------------------------------------------------------------------------------------------- HMI scan
 # The plugin's addresses for an HMI build it does not know, found in HmiMain3D itself (run on the computer: od + awk only). Each
 # "find" is a short window of instruction words around a place the plugin uses, with what moves between builds masked out ('.');
-# the values (function addresses, offsets, the tilt and fullscreen patch words) are then read from the words found. The patterns
+# the values (function addresses, offsets, the tilt and fullscreen patch words) are then read from the words found; the register that
+# holds "pressed" in the controller send (r8 in 006 / 1703, r7 in 1903-490 Build 41, issue #9) is one such part. The patterns
 # hold no firmware and are generated from the two known builds by tools/hmipatterns.py, which also checks that they find exactly
 # the known values there. The result (build.tab) goes into the plugin folder, and the plugin uses it when its first line names the
 # running HMI build; the plugin still compares every word with its expected original before it writes it.
@@ -183,10 +214,10 @@ hmi_patterns() {
 find touch 0 8 e92d4ff0 e28db020 e24dd074 e1a04000 e24b0028 e50b1064 ........ ........ e51b1064 e5913000 e5933...
 find tdfirst 4 8 e6ff2072 e50b606c e50b6070 e50b6078 e5939... e50b2080 e1a08009 ea...... e0895006 e5d53007
 find tdend 6 2 e58dc00c ........ e288800a e286600a e51b1064 e5913000 e5933... e1580003 1a...... e51b2070 e3520000 ........ ........
-find ctl 14 5 e2800c4e e35c0000 11a02008 03a02000 e2800060 e355003a e3a0c000 01a05008 13a05000 e58dc00c e58d5010 e58dc000 e58dc004 e58dc008 ........
+find ctl 14 5 e2800c4e e35c0000 11a0200. 03a02000 e2800060 e355003a e3a0c000 01a0500. 13a05000 e58dc00c e58d5010 e58dc000 e58dc004 e58dc008 ........
 find play 5 2 e5933090 e12fff33 e3a0108d e2800c52 e28000b0 ........ e5943010 e1a00003 e5933000
 find tA 4 2 1a...... e355000b 1355003a 0a...... e355000e 1355000d ........ e355000d 1a...... e359007e b1a0a009 a3a0a07e
-find tB 0 19 ........ e1a01005 e1a02009 e1a0300a e58d8000 ........ e51b002c e5d03014 e3130004 0a...... e1a03009 ........ e1a02005 e58da000 e58d8004 ........ ........ ........ ........ e59100b0 e355000b 03833001 e3530000 e6ef107a 11a03008 03a03000 e2800c4e e35c0000 11a02008 03a02000 e2800060 e355003a e3a0c000 01a05008 13a05000 e58dc00c e58d5010 e58dc000 e58dc004 e58dc008 ........
+find tB 0 19 ........ e1a01005 e1a02009 e1a0300a e58d.000 ........ e51b002c e5d03014 e3130004 0a...... e1a03009 ........ e1a02005 e58da000 e58d.004 ........ ........ ........ ........ e59100b0 e355000b 03833001 e3530000 e6ef107a 11a0300. 03a03000 e2800c4e e35c0000 11a0200. 03a02000 e2800060 e355003a e3a0c000 01a0500. 13a05000 e58dc00c e58d5010 e58dc000 e58dc004 e58dc008 ........
 find tC 12 12 e24b002c ........ ........ ........ ........ ea...... ........ e24b002c ........ e1a00004 e24bd020 e8bd8ff0 e51b302c e5d33014 e3130040 ........ ........ ........ ........ ........ ........ ........ ........ ........ ........ ........ to:16:tB
 find f1 3 3 e8bd8800 e92d4800 e28db004 e5d00108 e8bd8800 e92d4800 e3a00001 e28db004
 find f2 3 3 e28db004 e8bd8800 e92d4800 e5d00108 e28db004 e3500000 13a00002 03a00001
@@ -205,9 +236,9 @@ patch tilt tB 0xc e58dc008 =
 patch tilt tB 0x10 e58dc00c =
 patch tilt tB 0x14 e245c009 =
 patch tilt tB 0x18 e35c0003 =
-patch tilt tB 0x1c 978d810c =
+patch tilt tB 0x1c 978d810c r5:tB+0x84
 patch tilt tB 0x20 e355003a =
-patch tilt tB 0x24 01a05008 =
+patch tilt tB 0x24 01a05008 r8:tB+0x84
 patch tilt tB 0x28 13a05000 =
 patch tilt tB 0x2c e58d5010 =
 patch tilt tB 0x30 ea00001a =
@@ -321,6 +352,10 @@ hmi_scan() {
             a = A[QA[q]] + QO[q]; o = word(QA[q], QO[q]); nw = QN[q]
             if (QM[q] == "imm24") nw = substr(nw, 1, 2) substr(o, 3, 6)
             else if (substr(QM[q], 1, 2) == "b:") { split(substr(QM[q], 3), bb, "+"); nw = substr(nw, 1, 2) b24(a, A[bb[1]] + hex(substr(bb[2], 3))) }
+            else if (QM[q] ~ /^r[1-8]:/) {           # the register the found code uses (its last digit) into digit d of the new word
+                d = substr(QM[q], 2, 1) + 0; split(substr(QM[q], 4), bb, "+")
+                nw = substr(nw, 1, d - 1) substr(word(bb[1], hex(substr(bb[2], 3))), 8, 1) substr(nw, d + 1)
+            }
             printf "%s %x %s %s\n", QG[q], a, o, nw
         }
         if (!tilt) print "# tilt: not found (knob tilts off)"
@@ -417,8 +452,8 @@ restart_unit() {
 
 usage() {
     cat <<'EOF'
-CarPlay Advanced Settings installer 1.3.0 (NBT Evo iDrive 5 / iDrive 6)
-Usage: sh carplay-advanced.sh install|uninstall|status|restart|hud-probe [options]
+CarPlay Advanced Settings installer 1.4.6 (NBT Evo iDrive 5 / iDrive 6)
+Usage: sh carplay-advanced.sh install|uninstall|status|restart|check|hud-probe [options]
   hud-probe             Ask the cluster / HUD what it has (about 40 s, nothing installed or changed): the plugin's HUD state,
                         the HUDTerminal instances, the surfaces and their sizes, the navigation's instance names. Then, on a
                         terminal, a visual check: five test pictures (6WA, MINI, 6WB layouts; cluster terminal 82/00 and HUD
@@ -442,6 +477,11 @@ Usage: sh carplay-advanced.sh install|uninstall|status|restart|hud-probe [option
                         kombi = the Ethernet KOMBI (G-series, J29), both = the two (a car with a KOMBI and a MOST HUDTerminal)
   --help                Show this help
 
+check (from a computer, read only: nothing is uploaded, written or restarted on the head unit) reports what decides full-screen
+CarPlay on this head unit: the generation, the hashes, the HMI scan (the CARPLAY_FULLSCREEN flag code, the knob tilts) on iDrive 5
+and 6, and whether the HMI's layouts switch the CarPlay slot on IsCarPlayFullscreen. It writes CHECK-<time>.txt next to this script
+(hashes, versions and scan results only) and prints a pre-filled issue link with the same.
+
 The computer detects the generation from HmiMain3D: iDrive 6 has the native CarPlay knob-tilt handlers, iDrive 5 does not.
 iDrive 6 does fullscreen, knob tilts and the touchpad itself (HMI variant 0x9c71, coded on the car), so the HUD is all the
 plugin adds there; on iDrive 5 the plugin provides everything. The default follows the generation; --full / --hud override it.
@@ -457,7 +497,7 @@ EOF
 parse_args() {
  while [ "$#" -gt 0 ]; do
     case "$1" in
-        install|uninstall|status|restart|hud-probe)
+        install|uninstall|status|restart|check|hud-probe)
             [ -z "$ACTION" ] || die 'Specify exactly one action.'
             ACTION=$1 ;;
         --host)
@@ -500,6 +540,7 @@ parse_args() {
 [ "$#" -gt 0 ] || { usage; exit 1; }
 parse_args "$@"
 [ -n "$ACTION" ] || { usage; exit 1; }
+[ "$ACTION" != check ] || [ "$(uname -s)" != QNX ] || die 'check runs from a computer: it reads the HMI over SSH and hashes and scans it there.'
 [ "$KEEP_CONFIG" -eq 0 ] || [ "$ACTION" = uninstall ] || die '--keep-config requires uninstall.'
 [ "$RESTART" -eq 0 ] || [ "$ACTION" = install ] || [ "$ACTION" = uninstall ] || die '--restart-hmi goes with install or uninstall.'
 # On the head unit the computer passes --mode (and --kind); a manual run falls back to the generation's default. From a computer the
@@ -694,9 +735,6 @@ EOF
         done
     }
 
-    # A reboot never answers: the head unit goes down with the connection open, and ssh would wait for its timeout. So the restart runs
-    # in the background, its lines are shown as they come, and once the head unit says it reboots the installer stops waiting.
-    reboot_said() { grep 'rebooting the head unit' "$1" >/dev/null 2>&1 || grep 'Restarting the head unit (.*OnOffDSICommander' "$1" >/dev/null 2>&1; }
     # hud-probe's visual check: each test picture is drawn, you say whether the cluster and the HUD show it, and it is cleared. The
     # answers go into the saved output (they settle the layout where the terminal's own answers do not). Only on a terminal.
     ask_seen() {    # ask_seen <where>: y / n / ? from the terminal
@@ -732,15 +770,20 @@ EOF
             ok "$vc_n: cluster $vc_c, HUD $vc_h"
         done
     }
-    # The restart runs this script from the upload folder (as "restart" does), not from stdin: after an install on a BMW F-series unit
-    # "/bin/sh -s" through on -f gave no line in 40 s, while "restart" from the upload answered at once. libcpreboot.so goes along: a
-    # head unit without the plugin (or OnOffDSICommander) has nothing else to reboot with.
+    # The restart runs this script from a file on hu-omap, never from stdin (issue #12, BMW F31: "did not confirm the restart in 40 s"
+    # on every install): QNX's sh reads a script from a pipe one byte at a time, and over ssh -> hu-jacinto -> on -f -> hu-omap each
+    # byte is a round trip, so the ~85 KB before restart_unit took longer than the wait and the reboot never ran. The `restart` action
+    # always uploaded the script; the restart after an install streamed it. libcpreboot.so goes along: a head unit without the plugin
+    # (or OnOffDSICommander) has nothing else to reboot with. The upload is left for the next run to remove (the unit goes down).
     restart_staged() {
-        omap "/bin/ksh -c 'mkdir -p $STAGE'" < /dev/null || die "Cannot create $STAGE on hu-omap."
+        omap "/bin/ksh -c 'rm -rf $STAGE; mkdir -p $STAGE'" < /dev/null || die "Cannot create $STAGE on hu-omap."
         send "$0" "$STAGE/carplay-advanced.sh"
         if [ -f "$SRC/libcpreboot.so" ]; then send "$SRC/libcpreboot.so" "$STAGE/libcpreboot.so"; fi
         remote_reboot "/bin/sh $STAGE/carplay-advanced.sh restart" /dev/null
     }
+    # A reboot never answers: the head unit goes down with the connection open, and ssh would wait for its timeout. So the restart runs
+    # in the background, its lines are shown as they come, and once the head unit says it reboots the installer stops waiting.
+    reboot_said() { grep 'rebooting the head unit' "$1" >/dev/null 2>&1 || grep 'Restarting the head unit (.*OnOffDSICommander' "$1" >/dev/null 2>&1; }
     remote_reboot() {    # remote_reboot <command on hu-omap> <stdin file>: 0 once the reboot is under way
         rb_out=$WORK/reboot.out; : > "$rb_out"
         omap "$1" < "$2" > "$rb_out" 2>&1 &
@@ -796,6 +839,9 @@ EOF
             if [ "$k_name" = "$1" ] && [ "$k_file" = scan ]; then echo "$k_sum"; fi
         done
     }
+    known_no_fullscreen() {    # known_no_fullscreen <software>: true when the build has no Full-screen CarPlay ("fullscreen none")
+        supported_table | grep "^$1 *fullscreen *none\$" >/dev/null 2>&1
+    }
     scan_summary() {    # what the scan found, in a few lines
         n_tilt=$(grep -c '^tilt ' "$1" || :)
         n_fs=$(grep -c '^fs ' "$1" || :)
@@ -831,6 +877,129 @@ $(grep -v '^hmi ' "$WORK/build.tab")"
                 -e 's/`/%60/g' -e 's/{/%7B/g' -e 's/|/%7C/g' -e 's/}/%7D/g'
         done
     }
+    # -------- check: what decides full-screen CarPlay on this head unit (issue #7), read only. Everything comes from files read over
+    # SSH (HmiMain3D, libconn_carplay.so, mm-ipod, the layouts) and is worked out here; nothing is uploaded, written or restarted.
+    layout_facts() {    # layout_facts <label> <path on hu-omap>: one row on the layout and its CarPlay state; echoes "flag" if it keys on the flag
+        lf=$WORK/layout-$1.pbw    # MINI: the MINI brand layout; BMW: the HMI's common one (BMW, BMW i, Rolls-Royce)
+        if ! omap "/bin/ksh -c '[ -f $2 ]'" < /dev/null; then
+            row "$1 layout" 'not on this head unit' >&2
+            return 0
+        fi
+        omap "/bin/cat $2" < /dev/null > "$lf" 2>/dev/null || { row "$1 layout" "cannot be read: $2" >&2; return 0; }
+        lk=
+        if omap "/bin/ksh -c '[ -L $2 ]'" < /dev/null; then lk=' (linked by the plugin: its own copy)'; fi
+        # 1607-490 Build 153 names its states by index: its CarPlay state (21238) has the slot vec3(900, defaultD, ...), 1440 once
+        # pbw::patchCommon1607 has widened it (the plugin's copy)
+        lf_idx=
+        if ! grep LT_State_CarPlay "$lf" >/dev/null 2>&1; then
+            lf_hex=$(od -An -v -tx1 "$lf" | tr -dc 0-9a-f)
+            case "$lf_hex" in
+                *0a0408f6a501*08151002100210021a0b12090a072a051d000061441a0a0a0408cd870112022004*) lf_idx=fixed ;;
+                *0a0408f6a501*08151002100210021a0b12090a072a051d0000b4441a0a0a0408cd870112022004*) lf_idx=wide ;;
+                *) lf_idx=none ;;
+            esac
+            lf_hex=
+        fi
+        if [ "$lf_idx" = fixed ]; then
+            row "$1 layout" "$(wc -c < "$lf" | tr -d ' ') bytes, CarPlay state by index (1607 format) with a fixed width (no IsCarPlayFullscreen)$lk" >&2
+        elif [ "$lf_idx" = wide ]; then
+            row "$1 layout" "$(wc -c < "$lf" | tr -d ' ') bytes, CarPlay state by index (1607 format), already full width$lk" >&2
+        elif [ "$lf_idx" = none ]; then
+            row "$1 layout" "$(wc -c < "$lf" | tr -d ' ') bytes, no LT_State_CarPlay (CarPlay's place comes from another layout)$lk" >&2
+        elif grep IsCarPlayFullscreen "$lf" >/dev/null 2>&1; then
+            row "$1 layout" "$(wc -c < "$lf" | tr -d ' ') bytes, LT_State_CarPlay keyed on IsCarPlayFullscreen$lk" >&2
+            echo flag
+        else
+            row "$1 layout" "$(wc -c < "$lf" | tr -d ' ') bytes, LT_State_CarPlay with a fixed width (no IsCarPlayFullscreen)$lk" >&2
+        fi
+    }
+    check_report() {
+        # shellcheck disable=SC2086
+        hash_hmi=$($SHA256 < "$WORK/HmiMain3D") || die "Cannot hash $WORK/HmiMain3D."
+        hash_hmi=${hash_hmi%% *}
+        hash_conn=$(remote_sha256 "$CONN_LIB") || die "Cannot read $CONN_LIB on hu-omap."
+        known=$(supported_as "$hash_hmi" "$hash_conn")
+        say 'Searching HmiMain3D for the places the plugin uses (about 20 s)...'
+        if hmi_scan "$WORK/HmiMain3D" "$hmi_version" > "$WORK/build.tab" 2> "$WORK/scan.err"; then scan_ok=1; else scan_ok=0; fi
+        n_fs=0
+        [ "$scan_ok" -eq 0 ] || n_fs=$(grep -c '^fs ' "$WORK/build.tab" || :)
+        step 'Full-screen CarPlay on this head unit (read only: nothing was sent or changed)'
+        {
+            row 'HMI' "${hmi_version:-unknown}"
+            row 'Generation' "$gen"
+            row 'HmiMain3D' "sha256 $hash_hmi"
+            row 'libconn' "sha256 $hash_conn (libconn_carplay.so)"
+            row 'mm-ipod' "sha256 $hash_mmipod"
+            row 'Known build' "${known:-no (not in supported_table)}"
+            if [ "$scan_ok" -eq 1 ]; then
+                row 'HMI scan' 'complete'
+                scan_summary "$WORK/build.tab"
+            else
+                row 'HMI scan' "incomplete: $(tr '\n' ' ' < "$WORK/scan.err" 2>/dev/null)"
+            fi
+        } > "$WORK/check.rows"
+        flags=$(
+            layout_facts MINI "$LAYOUT_ID5" 2>> "$WORK/check.rows"
+            layout_facts BMW "$LAYOUT_COMMON_ID5" 2>> "$WORK/check.rows"
+        )
+        cat "$WORK/check.rows"
+        say ''
+        {
+            if [ -n "$known" ] && known_no_fullscreen "$known"; then
+                echo "Known build $known: the plugin has no Full-screen CarPlay for it yet (its layouts are an older format without"
+                echo 'LT_State_CarPlay); the option stays off and changes nothing. The other options use its built-in addresses.'
+            elif [ -n "$known" ]; then
+                echo "Known build $known: the plugin's Full-screen CarPlay option uses its built-in addresses."
+            elif [ "$KIND" = id6 ]; then
+                echo 'iDrive 6: the HMI shows CarPlay full screen itself when the variant 0x9c71 (CARPLAY_FULLSCREEN) is coded; the'
+                echo 'plugin does not patch iDrive 6 HMIs, so this installer offers no full screen here: the coding is the switch, and'
+                echo 'coding it back (then a restart) is the way back.'
+                if [ "$n_fs" -gt 0 ]; then
+                    echo "The scan still found the CARPLAY_FULLSCREEN flag code ($n_fs words) at the places it has on iDrive 5: evidence for a"
+                    echo 'run-time flag patch on this build, which is not implemented or tested.'
+                fi
+            elif [ "$scan_ok" -eq 1 ] && [ "$n_fs" -gt 0 ]; then
+                echo "Not a known build, but the scan found the CARPLAY_FULLSCREEN flag code ($n_fs words): the full plugin can force the flag"
+                echo 'on at run time with the scanned addresses (install asks first; untested on this build).'
+            elif [ "$scan_ok" -eq 1 ]; then
+                echo 'Not a known build; no CARPLAY_FULLSCREEN flag code was found: full screen would come from the layout patch alone'
+                echo '(as on HMI 1703), with the scanned addresses (install asks first; untested on this build).'
+            else
+                echo 'Not a known build and the scan is incomplete: the full plugin cannot be installed here yet (--hud installs the'
+                echo 'directions without any HMI patch). Sending this report in is what adds a build.'
+            fi
+            case "$flags" in
+                *flag*) echo 'The layout keys the CarPlay slot (and the side panel) on IsCarPlayFullscreen: full screen is a state of that'
+                        echo 'flag, rendered by the HMI, not a separate layout.' ;;
+            esac
+            if [ "$KIND" = id5 ] && { [ -n "$known" ] || [ "$scan_ok" -eq 1 ]; }; then
+                echo 'How the plugin undoes it: its HMI patches are made in memory at each start (none while the switch is off), and its'
+                echo 'layout and carplay.ini copies are path-manager links, which the head unit forgets at every reboot; "uninstall" or'
+                echo 'switching it off and "Restart to apply" gives the stock state. No system file is rewritten (only the boot hook line).'
+            fi
+        } > "$WORK/check.verdict"
+        while IFS= read -r l; do say "$l"; done < "$WORK/check.verdict"
+        # the report: no vehicle data (no VIN, coding values, logs or captures), only versions, hashes and what the scan found
+        report=$HERE/CHECK-$(date +%Y%m%d-%H%M%S).txt
+        {
+            echo "CarPlay Advanced Settings installer $VERSION: check (read only)"
+            sed 's/^  //' "$WORK/check.rows"
+            echo
+            cat "$WORK/check.verdict"
+            if [ "$scan_ok" -eq 1 ]; then
+                echo
+                echo 'build.tab:'
+                grep -v '^hmi ' "$WORK/build.tab"
+            fi
+        } > "$report" || die "Cannot write $report."
+        ok "Report written: ${report##*/} (versions, hashes and the scan only; no vehicle data)."
+        title="Full-screen check: HMI ${hmi_version:-unknown}"
+        body="$(sed 's/^  //' "$WORK/check.rows")
+Installer: $VERSION
+Result: (what you see: split screen / full screen, and whether CARPLAY_FULLSCREEN is coded)"
+        say 'To send it in (the link fills in the same lines):'
+        say "  $ISSUES_URL?title=$(urlencode "$title")&body=$(urlencode "$body")"
+    }
     report_unsupported() {
         say ''
         say 'This head unit software is not in the supported list (supported_table in this script):'
@@ -848,7 +1017,32 @@ mm-ipod sha256: $hash_mmipod
 Installer: $VERSION"
         say "  $ISSUES_URL?title=$(urlencode "$title")&body=$(urlencode "$body")"
     }
-    if [ "$ACTION" = install ] || [ "$ACTION" = status ]; then
+    hud_build_note() {    # the turn-by-turn install (or the full one on iDrive 6): no known build is needed; a known report or a link
+        hud_where=$(hud_reported "$hmi_version")
+        if [ -n "$hud_where" ]; then
+            ok "This HMI build has been reported with the turn-by-turn directions ($hud_where)."
+            return 0
+        fi
+        # not reported yet: the hashes, so the report is enough to list the build (issue #11 came without them)
+        # shellcheck disable=SC2086
+        hash_hmi=$($SHA256 < "$WORK/HmiMain3D") || die "Cannot hash $WORK/HmiMain3D."
+        hash_hmi=${hash_hmi%% *}
+        hash_conn=$(remote_sha256 "$CONN_LIB") || hash_conn=unreadable
+        say "This HMI build has not been reported with the turn-by-turn directions yet (${hmi_version:-unknown}); that is no"
+        say 'reason to stop: this install patches no HMI code. After a drive with CarPlay directions, please say how it went (the link'
+        say 'fills in the build and the hashes):'
+        title="HUD report: HMI ${hmi_version:-unknown}"
+        body="HMI build: ${hmi_version:-unknown}
+Generation: $gen
+HmiMain3D sha256: $hash_hmi
+libconn_carplay.so sha256: $hash_conn
+mm-ipod sha256: $hash_mmipod
+Installer: $VERSION ($MODE)
+Car and cluster: (e.g. BMW F30 2016, 6WA / 6WB / KOMBI as the installer found it)
+Result: (what the cluster / HUD shows: arrow, distance, street, lanes)"
+        say "  $ISSUES_URL?title=$(urlencode "$title")&body=$(urlencode "$body")"
+    }
+    if [ "$ACTION" = install ] || [ "$ACTION" = status ] || [ "$ACTION" = check ]; then
         step 'Checking the head unit software (reads HmiMain3D, about 60 MB)'
         hmi_path=$HMI_BIN
         omap "/bin/ksh -c '[ -f $HMI_BIN ]'" < /dev/null || hmi_path=$HMI_BIN_PLAIN
@@ -859,7 +1053,7 @@ Installer: $VERSION"
         MODE=${MODE_REQ:-$(default_mode)}; apply_mode
         gen=$([ "$KIND" = id6 ] && echo 'iDrive 6' || echo 'iDrive 5')
         ok "Head unit: $gen, ${hmi_version:-unknown}"
-        ok "Install mode: $MODE${MODE_REQ:+ (chosen)}${MODE_REQ:- (recommended for this HMI; --full / --hud to change)}"
+        [ "$ACTION" = check ] || ok "Install mode: $MODE${MODE_REQ:+ (chosen)}${MODE_REQ:- (recommended for this HMI; --full / --hud to change)}"
         # mm-ipod, in every mode: with the directions installed it is a link to the wrapper, so its kept original copy is hashed
         mm_path=$MMIPOD
         if omap "/bin/ksh -c '[ -L $MMIPOD ] && [ -f $MMIPOD_BIN ]'" < /dev/null; then mm_path=$MMIPOD_BIN; fi
@@ -872,6 +1066,7 @@ Installer: $VERSION"
         else
             note "mm-ipod is not one we know (sha256 $hash_mmipod). The directions hook reads the iPhone's iAP2 messages, not addresses in mm-ipod, so it should work, but it is untested on this one. Please report how it goes."
         fi
+        if [ "$ACTION" = check ]; then check_report; exit 0; fi
         # The full plugin patches HmiMain3D at fixed addresses, so on iDrive 5 the build must be known (by hash). On iDrive 6 the plugin
         # does not patch (it is an unknown build to it; the native features come from the HMI), so no hash is needed. HUD never patches.
         if [ "$MODE" = full ] && [ "$KIND" = id5 ]; then
@@ -925,9 +1120,11 @@ Installer: $VERSION"
         elif [ "$MODE" = full ] && [ "$KIND" = id6 ]; then
             say 'Note: on iDrive 6 the menu appears only if the car is coded for apps (CarPlay fullscreen variant 0x9c71); the full'
             say "plugin's HMI patches apply only to builds it knows, so here it adds the menu and the HUD and leaves fullscreen/tilts/touchpad to the HMI."
+            hud_build_note
         else
             say 'Turn-by-turn directions and the HUD-only menu, no HMI patch. The directions apply on the next CarPlay connection (no'
             say 'reboot); the HUD-only menu shows after a restart, where the car is coded for apps (A4A).'
+            hud_build_note
         fi
     fi
 
@@ -1190,7 +1387,7 @@ hud_probe() {
     say "CarPlay Advanced Settings installer $VERSION; hud-probe"
     say "HMI: ${hmi_build:-unknown}"
     say "Plugin: $(if [ -d "$PLUGIN" ]; then echo "installed$([ -f "$PLUGIN/hud_only" ] && echo ' (HUD-only menu: the drawing runs in mm-ipod, during a CarPlay connection)')"; else echo 'not installed'; fi)"
-    for f in hud_guidance hud_debug hud_layout hud_inst hud_box hud_box_6wa hud_hide hud_text_handles hud_comma hud_colour_day \
+    for f in hud_guidance hud_debug hud_car hud_layout hud_inst hud_box hud_box_6wa hud_hide hud_text_handles hud_comma hud_colour_day \
         hud_handles hud_handles_2 cluster; do
         if [ -f "$SETTINGS/$f" ]; then say "  switch $f: on$(v=; read -r v < "$SETTINGS/$f" 2>/dev/null; [ -n "$v" ] && echo " ($v)")"; else say "  switch $f: off"; fi
     done
@@ -1199,7 +1396,7 @@ hud_probe() {
     [ -d "$PLUGIN" ] && [ -d "$SETTINGS" ] || { say 'Nothing to ask: install the plugin (with "CarPlay directions in HUD" on) first.'; return 1; }
     [ -f "$HP_LOG" ] || { say "No plugin log ($HP_LOG): the plugin has not started since the last boot."; return 1; }
     say '--- what the plugin found at its start (MOST client, registry, handles from the set-up, layout, picture box) ---'
-    grep -e 'HUD: MOST' -e 'HUD: registry' -e 'HUDTerminal 82' -e 'HUD: layout probe' -e 'HUD: cluster layout' -e 'HUD: picture' \
+    grep -e 'HUD: MOST' -e 'HUD: car type' -e 'HUD: registry' -e 'HUDTerminal 82' -e 'HUD: layout probe' -e 'HUD: cluster layout' -e 'HUD: picture' \
         -e 'HUD: handles' -e 'HUD: copies' -e 'HUD: other client' -e 'HUD: texts on' -e 'HUD: day' -e 'HUD: night' "$HP_LOG" | sed -n 1,40p
     [ ! -f "$HP_CMD" ] || { say "The test channel is busy ($HP_CMD); try again in a minute."; return 1; }
     hp_start=$(count_lines "$HP_LOG")
@@ -1239,8 +1436,8 @@ c04 00${hp_h}01
     while read -r hp_l; do
         case "$hp_l" in *"fkt c04 op d "*) ;; *) continue ;; esac
         set -- ${hp_l##*: }
-        if [ "$#" -ge 7 ]; then hp_w=$((16#$4$5)); hp_ht=$((16#$6$7)); hp_form=6WB
-        elif [ "$#" -ge 6 ]; then hp_w=$((16#$3$4)); hp_ht=$((16#$5$6)); hp_form=F54
+        if [ "$#" -ge 7 ]; then hp_w=$(hexnum "$4$5"); hp_ht=$(hexnum "$6$7"); hp_form=6WB
+        elif [ "$#" -ge 6 ]; then hp_w=$(hexnum "$3$4"); hp_ht=$(hexnum "$5$6"); hp_form=F54
         else continue; fi
         [ "$hp_w" -gt 0 ] && [ "$hp_ht" -gt 0 ] || continue
         say "  0x$1$2: $hp_w x $hp_ht ($hp_form form)"
@@ -1255,6 +1452,15 @@ c04 00${hp_h}01
     say 'SUCCESS: hud-probe completed.'
 }
 hexdig() { case "$1" in 10) echo a ;; 11) echo b ;; 12) echo c ;; 13) echo d ;; 14) echo e ;; 15) echo f ;; *) echo "$1" ;; esac; }
+hexnum() {    # hexnum <hex digits>: the number (POSIX: no 16# arithmetic, which only ksh and bash have)
+    hn_v=0; hn_s=$1
+    while [ -n "$hn_s" ]; do
+        hn_r=${hn_s#?}; hn_c=${hn_s%"$hn_r"}; hn_s=$hn_r
+        case "$hn_c" in [0-9]) hn_d=$hn_c ;; [aA]) hn_d=10 ;; [bB]) hn_d=11 ;; [cC]) hn_d=12 ;; [dD]) hn_d=13 ;; [eE]) hn_d=14 ;; [fF]) hn_d=15 ;; *) hn_d=0 ;; esac
+        hn_v=$((hn_v * 16 + hn_d))
+    done
+    echo "$hn_v"
+}
 hex2() {    # hex2 <0..255>: two lowercase hex digits (no printf, cut or awk on the head unit)
     echo "$(hexdig $(($1 / 16)))$(hexdig $(($1 % 16)))"
 }
@@ -1327,7 +1533,7 @@ cluster_kind() { case "$1" in kombi=1*) echo kombi ;; kombi=0*) echo most ;; esa
 cluster_say() {     # cluster_say <probe line>
     case "$1" in
         kombi=1*) say 'Cluster: Ethernet KOMBI found (160.48.199.96:30502).' ;;
-        kombi=0*) say "Cluster: no Ethernet KOMBI (${1#kombi=0 }): MOST HUDTerminal (F-series)." ;;
+        kombi=0*) say "Cluster: no Ethernet KOMBI (${1#kombi=0 }): MOST HUDTerminal (F-series; 6WA or 6WB digital cluster, asked when the plugin starts)." ;;
         *)        say 'Cluster: not detected (the probe gave no answer).' ;;
     esac
 }
@@ -1492,6 +1698,18 @@ if [ "$ACTION" = uninstall ] && ! exists "$PLUGIN" && ! exists "$SETTINGS" && [ 
 fi
 say "Action: $ACTION; plugin source: ${PAYLOAD:-not needed}"
 say "HMI: $hmi_build${SOFTWARE:+ (supported software $SOFTWARE, checked by hash)}"
+# 1.3.9 (st1ng issue #25): a phone app with its own list of supported builds (ghackt's Carplay-advanced-installer) chose the HUD-only
+# install on ID5_1807-490-1809H Build 29 after this script supported it ("This software is not in the supported list"). The app decides
+# the mode before this script runs; this only says so in its log, with the command that installs the full plugin.
+if [ "$ACTION" = install ] && [ "$MODE" = hud ] && [ "$KIND" != id6 ]; then
+    hmi_label=
+    case "$hmi_build" in *' '*) for w in ${hmi_build#* }; do hmi_label=${hmi_label:+${hmi_label}_}$w; done ;; esac
+    if [ -n "$hmi_label" ] && is_software_name "$hmi_label"; then
+        say "Note: $hmi_label is a supported build for the full plugin in this script (supported_table), but the HUD-only install"
+        say "  was asked for. If an app chose it, the app's own list of supported builds does not have this build yet: update the app,"
+        say "  or run the full install: install --mode full --kind id5 --hmi $hmi_label (or this script from a computer with --full)."
+    fi
+fi
 say 'Backups first (nothing is changed before its backup is written and compared):'
 say "  $START_SCREEN -> <backup>/start_screen.sh"
 add_need "$START_SCREEN"
@@ -1518,8 +1736,16 @@ for entry in $SHADOWED; do
     fi
 done
 if [ -d "$PLUGIN" ]; then say "  $PLUGIN -> <backup>/plugin (moved)"; fi
+if [ -f "$SETTINGS/hud_guidance" ] && [ ! -L "$SETTINGS/hud_guidance" ] && [ ! -s "$SETTINGS/hud_guidance" ]; then
+    say "  $SETTINGS/hud_guidance: empty (the installer up to 1.3.2 wrote it so): first written as 1, as the menu writes its switches (same meaning; an empty file stops the phone app's copy of the backup)"
+fi
 if [ -d "$SETTINGS" ]; then
-    if [ "$ACTION" = install ]; then
+    if [ "$ACTION" = install ] && [ "$MODE" = hud ]; then
+        # the turn-by-turn install starts the folder anew (an earlier full install's layouts, carplay.ini and Connectivity wrapper
+        # would otherwise still be linked by boot.sh); until 1.3.3 this line said the switches stay, and the HUD ones were lost
+        say "  $SETTINGS -> <backup>/settings (moved: the turn-by-turn install starts it anew; its HUD settings, hud_*, kombi_* and debug_log, go into the new one)"
+        for f in "$SETTINGS"/*; do if [ -f "$f" ] && [ ! -L "$f" ]; then add_need "$f"; fi; done
+    elif [ "$ACTION" = install ]; then
         say "  $SETTINGS: switches stay in place; a copy of its files goes to <backup>/settings-copy"
         for f in "$SETTINGS"/*; do if [ -f "$f" ] && [ ! -L "$f" ]; then add_need "$f"; fi; done
     elif [ "$KEEP_CONFIG" -eq 1 ]; then
@@ -1572,7 +1798,8 @@ if [ "$ACTION" = install ]; then
         *)     say "  most: CarPlay directions on the MOST HUDTerminal ($RGHOOK)." ;;
     esac
     if [ "$MODE" = hud ] && [ "$CLUSTER_KIND" != kombi ]; then
-        say '  Drawn on MOST from mm-ipod (without the full plugin): not car-verified yet.'
+        say '  Drawn on MOST from mm-ipod (without the full plugin): seen working on 6WA clusters (BMW F25 X3, F31), not yet on a 6WB.'
+        say '  If nothing shows: /var/iap/rghook.log after a CarPlay route (menu HUD effects > HUD debug log on), or the hud-probe action.'
     fi
     say "  Shown in the cluster, and in the HUD if one is fitted. Recorded in $SETTINGS/cluster."
 fi
@@ -1701,6 +1928,15 @@ echo "$ACTION" > "$BACKUP/action"
 echo "$hmi_build" > "$BACKUP/hmi-version"
 
 # 1. backups ---------------------------------------------------------------------------------------------------
+# hud_guidance as the menu writes its switches ("1", flagSet in cpm.cpp). The installer up to 1.3.2 wrote it empty, and the backup
+# gets it (copied, or in the settings folder a turn-by-turn install or an uninstall moves there). The CarPlay Advanced Installer
+# phone app copies the backup to the phone after the install and stopped at that empty file ("Backup read failed:
+# <backup>/settings/hud_guidance", app 1.6.4, a turn-by-turn update over 1.3.1, 2026-11-19). Only its existence counts (the
+# menu's flagGet, boot.sh's [ -f ], librghook's open), so "1" changes nothing.
+if [ -f "$SETTINGS/hud_guidance" ] && [ ! -L "$SETTINGS/hud_guidance" ] && [ ! -s "$SETTINGS/hud_guidance" ]; then
+    echo 1 > "$SETTINGS/hud_guidance" || die "Cannot write $SETTINGS/hud_guidance."
+    say "$SETTINGS/hud_guidance was empty (written so by the installer up to 1.3.2): now 1, as the menu writes it."
+fi
 copy_verified "$START_SCREEN" "$BACKUP/start_screen.sh"
 mkdir -p "$ORIG"
 if ! exists "$ORIG/start_screen.sh"; then
@@ -1770,12 +2006,12 @@ if [ "$ACTION" = install ]; then
     say 'Plugin files staged and compared with the originals.'
 fi
 
-# HUD-only (the default on iDrive 6): the route-guidance wrapper the menu plugin would build at runtime (the HUD-only menu does not).
-# The original mm-ipod is copied in so the wrapper can exec it (the shadow link would otherwise point at the wrapper itself); the
-# switch turns boot.sh's relink on. Staged like the plugin so the same transaction / rollback covers it (staged-settings -> $SETTINGS
-# on commit). A second HUD-only install on top of one finds mm-ipod as the plugin's link to the wrapper: the wrapper then gets the
-# original kept in $ORIG by the first install (compared above).
+# id6: the route-guidance wrapper the menu plugin would build at runtime (there is no menu plugin on id6). The original mm-ipod is copied
+# in so the wrapper can exec it (the shadow link would otherwise point at the wrapper itself); the switch turns boot.sh's relink on.
+# Staged like the plugin so the same transaction / rollback covers it (staged-settings -> $SETTINGS on commit).
 if [ "$ACTION" = install ] && [ "$MODE" = hud ]; then
+    # A second --hud install on top of one (issue #9: "missing or already a link"): mm-ipod is then the plugin's own link to the
+    # wrapper, and the original is the one kept in $ORIG when the first install made that link (compared when it was kept).
     MM_SRC=$MMIPOD
     if [ -L "$MMIPOD" ] && [ -f "$ORIG/mm-ipod" ] && [ ! -L "$ORIG/mm-ipod" ]; then
         MM_SRC=$ORIG/mm-ipod
@@ -1789,15 +2025,34 @@ if [ "$ACTION" = install ] && [ "$MODE" = hud ]; then
 #!/bin/ksh
 # CarPlayMenu: route guidance: mm-ipod with librghook.so (installed by carplay-advanced.sh, HUD-only)
 R=/var/opt/hmi/data/rw; [ -d $R ] || R=/fs/sda1/opt/hmi/data/ID5
-mkdir -p /var/iap/pps
-export LD_PRELOAD=$R/Plugins/CarPlayMenu/librghook.so${LD_PRELOAD:+:$LD_PRELOAD}
-exec $R/carplaymenu/bin/mm-ipod "$@"
+[ -d /var/iap ] || mkdir -p /var/iap
+L=$R/Plugins/CarPlayMenu/librghook.so
+B=$R/carplaymenu/bin/mm-ipod
+[ -x $B ] || B=/fs/sda0/opt/conn/bin/carplay/mm-ipod
+[ -f $L ] && export LD_PRELOAD=$L${LD_PRELOAD:+:$LD_PRELOAD}
+exec $B "$@"
 WRAP
     ksh -n "$BACKUP/staged-settings/mm-ipod" >/dev/null 2>&1 || die 'The generated mm-ipod wrapper does not parse with ksh -n.'
     chmod 755 "$BACKUP/staged-settings/mm-ipod"
-    : > "$BACKUP/staged-settings/hud_guidance"
+    echo 1 > "$BACKUP/staged-settings/hud_guidance" || die 'Cannot stage the hud_guidance switch.'     # not empty: see "1. backups"
+    # The earlier folder's HUD settings go into the new one (1.3.3): the menu's HUD effects, colour and debug log, the HUD tuning and
+    # the handle maps the plugin learnt (hud_*), the KOMBI street's width (kombi_*, 1.3.5), and debug_log. The rest of it stays in the
+    # backup only: an earlier full install's layouts, carplay.ini and Connectivity wrapper must not be linked by boot.sh in a
+    # turn-by-turn install.
+    kept=
+    if [ -d "$SETTINGS" ]; then
+        for f in "$SETTINGS"/hud_* "$SETTINGS"/kombi_* "$SETTINGS"/debug_log; do
+            n=${f##*/}
+            [ "$n" != hud_guidance ] || continue
+            if [ -f "$f" ] && [ ! -L "$f" ]; then
+                copy_verified "$f" "$BACKUP/staged-settings/$n"
+                kept="$kept $n"
+            fi
+        done
+    fi
     chmod 755 "$BACKUP/staged-settings"
-    say 'Route-guidance wrapper (mm-ipod + librghook) staged.'
+    say 'Route-guidance wrapper (mm-ipod + librghook) staged (the turn-by-turn install).'
+    [ -z "$kept" ] || say "HUD settings kept from the earlier $SETTINGS:$kept"
 fi
 
 NEW_SS=
@@ -1907,7 +2162,11 @@ say "SUCCESS: $ACTION completed. Previous files: $BACKUP ; system originals: $OR
 if [ "$ACTION" = install ] && [ "$MODE" = hud ]; then
     say 'Turn-by-turn HUD route guidance installed. It loads into mm-ipod, which is started per CarPlay session: reconnect the phone'
     say '(or restart the head unit) to apply. The HUD-only menu (directions, HUD effects, colour) appears in Media/Radio after a restart'
-    say 'where the car is coded for apps (A4A). Fullscreen, knob tilts and the touchpad are native on iDrive 6.'
+    if [ "$KIND" = id6 ]; then
+        say 'where the car is coded for apps (A4A). Fullscreen, knob tilts and the touchpad are native on iDrive 6.'
+    else
+        say 'where the car is coded for apps (A4A). Fullscreen, knob tilts and the touchpad need the full install (--full).'
+    fi
 elif [ "$ACTION" = install ]; then
     say 'The new plugin is loaded when the HMI starts: restart the head unit, then Media/Radio -> CarPlay Advanced Settings.'
 else

@@ -18,6 +18,10 @@ struct rg_view {
   char exitno[16];               /* the maneuver's exit number (ExitInfo, else "Take exit 23B" -> "23B"), "" = none */
   unsigned nl;                   /* lanes the iPhone shows now, left to right */
   struct rg_lane lanes[8];
+  unsigned rs;                   /* the route state as the iPhone sent it (0 none, 1 set, 2 arrived, 3 loading, 4 locating, 5 rerouting,
+                                    6 proceed to route) */
+  unsigned known;                /* 1 = the current maneuver's own data (0x5202) arrived */
+  unsigned lane_index;           /* the iPhone's current lane guidance index */
 };
 
 int rg_view_get(struct rg_view *v);                        /* rghook.c: 1 = guidance state filled in, 0 = none yet */
@@ -26,6 +30,7 @@ int rg_file_write(const char *path, const char *text);     /* rghook.c: 0 ok */
 void rg_file_unlink(const char *path);
 long rg_fd_read(int fd, void *buf, unsigned n);            /* rghook.c: libc's read() (this library's own read() is the hook) */
 void rg_log_line(const char *s);                           /* rghook.c: one line to rghook.log */
+int rg_lower_priority(int max);                            /* rghook.c: the calling thread's priority to at most max; the old one */
 int rg_debug_log(void);                                    /* rghook.c: 1 = switch debug_log set (per-event lines), read once */
 void rgk_kick(void);                                       /* rgkombi.cpp: guidance arrived; starts the KOMBI worker once */
 void rgh_kick(void);                                       /* rghud.cpp: guidance arrived; starts the MOST HUD drawing once */

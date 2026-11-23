@@ -205,6 +205,24 @@ static int flag_set(const char *name) {
   return 0;
 }
 
+/* A switch for the per-event paths (every knob rotation, every held-tilt repeat): read at most once a second, so a menu change still
+   applies within a second but the input path does not open files on the disk at every event (each one is two lookups on the flash
+   filesystem when the switch is off). Races between threads only cost an extra read. */
+struct cached_flag {
+  const char *name;
+  volatile int on, read;
+  volatile u32 at;
+};
+static int flag_cached(struct cached_flag *c) {
+  u32 now = now_ms();
+  if (!c->read || (int)(now - c->at) >= 1000 || (int)(now - c->at) < 0) {
+    c->on = flag_set(c->name);
+    c->at = now;
+    c->read = 1;
+  }
+  return c->on;
+}
+
 /* ---- knob directions -------------------------------------------------------------------------------------------------------------- */
 #define KNOB_FILE  "/dev/shmem/carplaymenu-knob"
 #define KNOB_MAGIC 0x4b4e4231u /* "KNB1" */
@@ -254,10 +272,32 @@ static int switch_numsn(const char *name, int *v, int max) {
 static int switch_nums(const char *name, int v[2]) {
   return switch_numsn(name, v, 2);
 }
-/* the test switch knob_nudge: "<size 1..127> <hold ms 10..1000>"; absent or unreadable: the defaults */
+/* switch_numsn read at most once a second (see flag_cached): up to 4 numbers */
+struct cached_nums {
+  const char *name;
+  int v[4], k, read;
+  u32 at;
+};
+static int nums_cached(struct cached_nums *c, int *v, int max) {
+  u32 now = now_ms();
+  if (!c->read || (int)(now - c->at) >= 1000 || (int)(now - c->at) < 0) {
+    int t[4];
+    int k = switch_numsn(c->name, t, max > 4 ? 4 : max);
+    for (int j = 0; j < 4; j++)
+      c->v[j] = j < k ? t[j] : 0;
+    c->k = k;
+    c->at = now;
+    c->read = 1;
+  }
+  for (int j = 0; j < max && j < 4; j++)
+    v[j] = c->v[j];
+  return c->k;
+}
+/* the test switch knob_nudge: "<size 1..127> <hold ms 10..1000>"; absent or unreadable: the defaults (read at most once a second) */
 static void nudge_params(int *size, int *ms) {
+  static struct cached_nums c = { "knob_nudge" };
   int v[2];
-  int k = switch_nums("knob_nudge", v);
+  int k = nums_cached(&c, v, 2);
   *size = k >= 1 && v[0] >= 1 && v[0] <= 127 ? v[0] : NUDGE_SIZE;
   *ms = k >= 2 && v[1] >= 10 && v[1] <= 1000 ? v[1] : NUDGE_MS;
 }
@@ -271,11 +311,13 @@ static void nudge_params(int *size, int *ms) {
 #define REPEAT_MS    350
 #define REPEAT_HOLD  200
 #define REPEAT_MAX   10000
-static int repeat_params(int *first, int *every, int *hold) { /* 0 = off */
-  if (flag_set("no_knob_repeat"))
+static int repeat_params(int *first, int *every, int *hold) { /* 0 = off; both switches read at most once a second */
+  static struct cached_flag off = { "no_knob_repeat" };
+  static struct cached_nums c = { "knob_repeat" };
+  if (flag_cached(&off))
     return 0;
   int v[3];
-  int k = switch_numsn("knob_repeat", v, 3);
+  int k = nums_cached(&c, v, 3);
   *first = k >= 1 && v[0] >= 100 && v[0] <= 3000 ? v[0] : REPEAT_FIRST;
   *every = k >= 2 && v[1] >= 100 && v[1] <= 3000 ? v[1] : REPEAT_MS;
   *hold = k >= 3 && v[2] <= 1000 ? v[2] : REPEAT_HOLD;
@@ -380,7 +422,9 @@ static void knob_start(void *mgr) {
 /* CCarplayServiceMgr::start(const char *config): the service object Connectivity uses for the knob; it parses the carplay.ini named
    here once (CConfigReader::parse), and the knob's NudgeSupport is read from that */
 int _ZN18CCarplayServiceMgr5startEPKc(void *mgr, const char *a) {
-  start_fn f = (start_fn)original_fn("_ZN18CCarplayServiceMgr5startEPKc");
+  static start_fn f;
+  if (!f)
+    f = (start_fn)original_fn("_ZN18CCarplayServiceMgr5startEPKc");
   char b[160];
   snprintf(b, sizeof b, "cppinch: CarPlay start, config %s", a ? a : "(none)");
   log_text(b);
@@ -617,7 +661,8 @@ int _ZN18CCarplayServiceMgr10setKnobEvtEbbbiii(void *mgr, int select, int home, 
   if (!f)
     f = (knob_fn)original_fn("_ZN18CCarplayServiceMgr10setKnobEvtEbbbiii");
   knob_start(mgr);
-  if (wheel && !select && !home && !back && !x && !y && flag_set("knob_zoom")) {
+  static struct cached_flag zoom = { "knob_zoom" }, reverse = { "zoom_reverse" };
+  if (wheel && !select && !home && !back && !x && !y && flag_cached(&zoom)) {
     static int started, told;
     if (g_ts2) {
       if (!started) {
@@ -626,7 +671,7 @@ int _ZN18CCarplayServiceMgr10setKnobEvtEbbbiii(void *mgr, int select, int home, 
         if (pthread_create(&t, 0, zoom_thread, 0) != 0)
           log_text("cppinch: zoom thread failed");
       }
-      if ((wheel > 0) != flag_set("zoom_reverse"))
+      if ((wheel > 0) != flag_cached(&reverse))
         g_zin++;
       else
         g_zout++;
@@ -644,7 +689,9 @@ typedef u32 (*desc_fn)(void *, u8 **);
 /* CCarPlayServiceCore::getHIDDescriptor_Touch(unsigned char **) -> length (only called with [TouchScreen] in carplay.ini): two fingers
    with "Enable rotation as zoom" */
 u32 _ZN19CCarPlayServiceCore22getHIDDescriptor_TouchEPPh(void *core, u8 **out) {
-  desc_fn f = (desc_fn)original_fn("_ZN19CCarPlayServiceCore22getHIDDescriptor_TouchEPPh");
+  static desc_fn f;
+  if (!f)
+    f = (desc_fn)original_fn("_ZN19CCarPlayServiceCore22getHIDDescriptor_TouchEPPh");
   if (!f) {
     log_text("cppinch: original getHIDDescriptor_Touch not found");
     return 0;
@@ -677,11 +724,15 @@ u32 _ZN19CCarPlayServiceCore22getHIDDescriptor_TouchEPPh(void *core, u8 **out) {
 }
 typedef int (*tupd_fn)(void *, int, int, int);
 typedef int (*post_fn)(void *, const u8 *, u32);
-/* CCarPlayVirtualHID::touchUpdate(touch, x, y): 1 = sent. With the two-finger descriptor: finger 1 as given, finger 2 the pinch's */
+/* CCarPlayVirtualHID::touchUpdate(touch, x, y): 1 = sent. With the two-finger descriptor: finger 1 as given, finger 2 the pinch's.
+   Every touchscreen event comes through here (down, each move of a swipe, up): the original is looked up once (until 1.4.4 it was
+   dlopen + dlsym at every event, in the touch path of every swipe). */
 int _ZN18CCarPlayVirtualHID11touchUpdateEhii(void *vhid, int touch, int x, int y) {
   static int n;
   if (!g_ts2) {
-    tupd_fn f = (tupd_fn)original_fn("_ZN18CCarPlayVirtualHID11touchUpdateEhii");
+    static tupd_fn f;
+    if (!f)
+      f = (tupd_fn)original_fn("_ZN18CCarPlayVirtualHID11touchUpdateEhii");
     return f ? f(vhid, touch, x, y) : 0;
   }
   void *dev = *(void **)((u8 *)vhid + 4); /* the touchscreen HID device, as the original reads it */
@@ -721,7 +772,9 @@ int _ZN18CCarplayServiceMgr14setTouchPadEvtEbiiiPhiiS0_i(void *mgr, int touch, i
 
 /* CCarPlayServiceCore::getHIDDescriptor_TouchPad(unsigned char **) -> length; the buffer is malloc'ed (freed by the caller) */
 u32 _ZN19CCarPlayServiceCore25getHIDDescriptor_TouchPadEPPh(void *core, u8 **out) {
-  desc_fn f = (desc_fn)original_fn("_ZN19CCarPlayServiceCore25getHIDDescriptor_TouchPadEPPh");
+  static desc_fn f;
+  if (!f)
+    f = (desc_fn)original_fn("_ZN19CCarPlayServiceCore25getHIDDescriptor_TouchPadEPPh");
   if (!f) {
     log_text("cppinch: original getHIDDescriptor_TouchPad not found");
     return 0;
@@ -798,12 +851,15 @@ static int is_near(int a, int b) {
 }
 
 typedef int (*upd_fn)(void *, int, int, int, int, u8 *, int, int, u8 *, int);
-/* CCarPlayVirtualHID::touchPadUpdate(touch, x, y, len1, data1, q1, len2, data2, q2): 1 = sent */
+/* CCarPlayVirtualHID::touchPadUpdate(touch, x, y, len1, data1, q1, len2, data2, q2): 1 = sent. Every touchpad event: the original
+   looked up once (until 1.4.4 at every event) */
 int _ZN18CCarPlayVirtualHID14touchPadUpdateEiiiiPhiiS0_i(void *vhid, int touch, int x, int y, int len1, u8 *data1, int q1, int len2,
                                                          u8 *data2, int q2) {
   static int n;
   if (!g_two) {
-    upd_fn f = (upd_fn)original_fn("_ZN18CCarPlayVirtualHID14touchPadUpdateEiiiiPhiiS0_i");
+    static upd_fn f;
+    if (!f)
+      f = (upd_fn)original_fn("_ZN18CCarPlayVirtualHID14touchPadUpdateEiiiiPhiiS0_i");
     int r = f ? f(vhid, touch, x, y, len1, data1, q1, len2, data2, q2) : 0;
     if (log_due(&n)) {
       char b[96];

@@ -757,6 +757,23 @@ inline void sleepMs(u32 ms) {
   usleep(ms * 1000);
 }
 #endif
+#ifdef KOMBI_HOST
+// the tests' host: its own values (the Mac's are QNX's; Linux's differ)
+enum {
+  kAfInet = AF_INET,
+  kSockStream = SOCK_STREAM,
+  kSolSocket = SOL_SOCKET,
+  kSoSndTimeo = SO_SNDTIMEO,
+  kSoRcvTimeo = SO_RCVTIMEO,
+  kSoError = SO_ERROR,
+  kIpprotoTcp = IPPROTO_TCP,
+  kTcpNodelay = TCP_NODELAY,
+  kMsgPeek = MSG_PEEK,
+  kMsgDontwait = MSG_DONTWAIT,
+  kFGetfl = F_GETFL,
+  kFSetfl = F_SETFL
+};
+#else
 enum {
   kAfInet = 2,
   kSockStream = 1,
@@ -771,12 +788,29 @@ enum {
   kFGetfl = 3,
   kFSetfl = 4
 };
+#endif
+#if defined(KOMBI_HOST) && defined(__linux__)
+struct SockAddr {
+  u16 family;  // Linux sockaddr_in: no length byte, a 16-bit family
+  u8 port[2];
+  u8 addr[4];
+  u8 zero[8];
+  void setFamily() {
+    family = kAfInet;
+  }
+};
+#else
 struct SockAddr {
   u8 len, family;
   u8 port[2];
   u8 addr[4];
   u8 zero[8];
+  void setFamily() {
+    len = sizeof *this;
+    family = kAfInet;
+  }
 };  // BSD sockaddr_in (QNX and the Mac)
+#endif
 
 const u16 kClientId = 0x7E01;  // our own SOME/IP client id (NBT-AAD's); the factory head unit uses its own
 enum {
@@ -835,8 +869,7 @@ struct Client {
     fcntl(f, kFSetfl, fl | kNonblock);
     SockAddr a;
     memset(&a, 0, sizeof a);
-    a.len = sizeof a;
-    a.family = kAfInet;
+    a.setFamily();
     a.port[0] = (u8)(port >> 8);
     a.port[1] = (u8)port;
     memcpy(a.addr, ip, 4);
@@ -1060,95 +1093,221 @@ inline void copyText(char *d, u32 cap, const char *s) {
   }
   d[i] = 0;
 }
-// The street's length on the KOMBI: the cluster takes long names, but the windscreen HUD's larger font cuts them off at the right
-// edge. g_roadMax (rgkombi.cpp: the file kombi_road_max, 8..60) in characters; 0 = kRoadMax.
-const u32 kRoadMax = 22;
-u32 g_roadMax = 0;
-inline bool sameWord(const char *w, u32 n, const char *s) {
+// ---- the street, made to fit the windscreen HUD (1.3.5) ----------------------------------------------------------------------
+// The KOMBI draws the street in its own font, in the cluster and in the windscreen HUD. The guidance service takes the text alone
+// (TextResource 0x03: a language tag and a UTF-16 string; no font, no size, no second text for the HUD), and the HUD's field is the
+// narrower one: it cuts the end off at its right edge (ghackt, J29 / A90: 1.2.9 with up to 40 characters; 1.3.3 with "Exit 104  ..."
+// lines of up to 22). How wide the field is has not been published (BMW: the HUD "can only show a certain number of text characters"),
+// so the street is fitted by its width, not its length: in the advance widths of a grotesque sans like the KOMBI's (Helvetica's,
+// 1/1000 em: a digit 556, "i" 222, "W" 944), into a field g_roadDigits digits wide less half a digit for the KOMBI font's own widths.
+// g_roadDigits: the file kombi_road_max (8..60, rgkombi.cpp): the whole digits the HUD shows of kombi_road_ruler's row; 0 =
+// kRoadDigits. 1.3.3 sent up to 16.7 digits ("Exit 104  Main Street"), and those were cut off.
+const u32 kDigitW = 556;
+const u32 kRoadDigits = 14;
+const u32 kRoadMinW = 4 * kDigitW;  // the least room for a road after an exit number
+u32 g_roadDigits = 0;
+bool g_ruler = false;  // kombi_road_ruler: this row instead of every street, to count how many digits the HUD shows whole
+const char kRuler[] = "1234567890123456789012345678901234567890";
+inline u32 roadWidth() {
+  return (g_roadDigits ? g_roadDigits : kRoadDigits) * kDigitW - kDigitW / 2;
+}
+// The advance width of the character that starts with byte c (UTF-8): ASCII from the table, other letters 600, CJK and symbols 1000,
+// a continuation byte 0
+inline u32 leadW(u8 c) {
+  static const u16 kW[95] = {
+    278,  278, 355, 556, 556, 889, 667, 222, 333, 333, 389, 584, 278, 333, 278, 278,  // space ! " # $ % & ' ( ) * + , - . /
+    556,  556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556,  // 0-9 : ; < = > ?
+    1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778,  // @ A-O
+    667,  778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556,  // P-Z [ \ ] ^ _
+    222,  556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556,  // ` a-o
+    556,  556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584,       // p-z { | } ~
+  };
+  if (c >= 0x20 && c < 0x7f)
+    return kW[c - 0x20];
+  return c < 0xc0 ? 0 : c < 0xe0 ? 600 : 1000;
+}
+// the width of n bytes of UTF-8 text, in 1/1000 em
+inline u32 textW(const char *s, u32 n) {
+  u32 w = 0;
+  for (u32 i = 0; i < n; i++)
+    w += leadW((u8)s[i]);
+  return w;
+}
+inline u32 zlen(const char *s) {
+  u32 n = 0;
+  while (s[n])
+    n++;
+  return n;
+}
+// The short forms USPS writes in addresses (Publication 28): the street suffixes as ghackt listed them for 1.3.5, with Route and
+// Turnpike; the directions; and the words that also stand in front of a name. Matched as whole words in any case. WAY, LOOP, MALL,
+// OVAL, PARK, ROW, RUN and SPUR are their own short forms and stay as the iPhone writes them.
+const char *const kSuffix[][2] = {
+  { "Avenue", "AVE" },     { "Boulevard", "BLVD" }, { "Circle", "CIR" },       { "Court", "CT" },         { "Drive", "DR" },
+  { "Lane", "LN" },        { "Place", "PL" },       { "Road", "RD" },          { "Square", "SQ" },        { "Street", "ST" },
+  { "Terrace", "TER" },    { "Alley", "ALY" },      { "Beach", "BCH" },        { "Bend", "BND" },         { "Bluff", "BLF" },
+  { "Bottom", "BTM" },     { "Bridge", "BRG" },     { "Brook", "BRK" },        { "Burg", "BG" },          { "Bypass", "BYP" },
+  { "Causeway", "CSWY" },  { "Center", "CTR" },     { "Canyon", "CYN" },       { "Cape", "CPE" },         { "Crossing", "XING" },
+  { "Crest", "CRST" },     { "Creek", "CRK" },      { "Crescent", "CRES" },    { "Dale", "DL" },          { "Dam", "DM" },
+  { "Divide", "DV" },      { "Estate", "EST" },     { "Expressway", "EXPY" },  { "Extension", "EXT" },    { "Falls", "FLS" },
+  { "Ferry", "FRY" },      { "Field", "FLD" },      { "Fort", "FT" },          { "Freeway", "FWY" },      { "Garden", "GDN" },
+  { "Gateway", "GTWY" },   { "Glen", "GLN" },       { "Grove", "GRV" },        { "Harbor", "HBR" },       { "Heights", "HTS" },
+  { "Highway", "HWY" },    { "Hill", "HL" },        { "Hollow", "HOLW" },      { "Inlet", "INLT" },       { "Island", "IS" },
+  { "Junction", "JCT" },   { "Key", "KY" },         { "Knoll", "KNL" },        { "Lake", "LK" },          { "Landing", "LNDG" },
+  { "Light", "LGT" },      { "Lock", "LCK" },       { "Manor", "MNR" },        { "Meadow", "MDW" },       { "Mill", "ML" },
+  { "Mission", "MSN" },    { "Mount", "MT" },       { "Mountain", "MTN" },     { "Neck", "NCK" },         { "Orchard", "ORCH" },
+  { "Parkway", "PKWY" },   { "Point", "PT" },       { "Port", "PRT" },         { "Prairie", "PR" },       { "Ranch", "RNCH" },
+  { "Rapids", "RPDS" },    { "Rest", "RST" },       { "Ridge", "RDG" },        { "River", "RIV" },        { "Shoal", "SHL" },
+  { "Shore", "SHR" },      { "Spring", "SPG" },     { "Springs", "SPGS" },     { "Station", "STA" },      { "Stravenue", "STRA" },
+  { "Stream", "STRM" },    { "Summit", "SMT" },     { "Trace", "TRCE" },       { "Trail", "TRL" },        { "Trailer", "TRLR" },
+  { "Tunnel", "TNL" },     { "Route", "RTE" },      { "Turnpike", "TPKE" },
+};
+const char *const kDirection[][2] = {
+  { "North", "N" },      { "South", "S" },      { "East", "E" },      { "West", "W" },      { "Northeast", "NE" }, { "Northwest", "NW" },
+  { "Southeast", "SE" }, { "Southwest", "SW" }, { "Northbound", "NB" }, { "Southbound", "SB" }, { "Eastbound", "EB" },
+  { "Westbound", "WB" },
+};
+const char *const kPrefix[][2] = { { "Mount", "MT" }, { "Fort", "FT" }, { "Point", "PT" }, { "Saint", "St" } };
+// w[0..n) is s, ASCII letters in any case
+inline bool wordIs(const char *w, u32 n, const char *s) {
   u32 i = 0;
-  while (i < n && s[i] == w[i])
-    i++;
+  for (; i < n && s[i]; i++) {
+    u8 a = (u8)w[i], b = (u8)s[i];
+    if (a >= 'A' && a <= 'Z')
+      a = (u8)(a + 32);
+    if (b >= 'A' && b <= 'Z')
+      b = (u8)(b + 32);
+    if (a != b)
+      return false;
+  }
   return i == n && !s[i];
 }
-inline u32 utf8Chars(const char *s, u32 n) {
-  u32 c = 0;
-  for (u32 i = 0; i < n; i++)
-    c += ((u8)s[i] & 0xc0) != 0x80;
-  return c;
+template <u32 N> inline int findWord(const char *const (&tab)[N][2], const char *w, u32 n) {
+  for (u32 i = 0; i < N; i++)
+    if (wordIs(w, n, tab[i][0]))
+      return (int)i;
+  return -1;
 }
-// A street made to fit in max characters (UTF-8). One that fits is kept as it is; a longer one gets common English words in their
-// short forms (Street St, North N, ...), then trailing words dropped while it is still longer, one long word cut at a character.
-// out holds cap bytes.
-inline void shortRoad(const char *in, char *out, u32 cap, u32 max) {
-  static const char *const kWords[][2] = {
-    { "Street", "St" },     { "Avenue", "Ave" },   { "Boulevard", "Blvd" }, { "Road", "Rd" },         { "Drive", "Dr" },
-    { "Highway", "Hwy" },   { "Parkway", "Pkwy" }, { "Freeway", "Fwy" },    { "Expressway", "Expy" }, { "Turnpike", "Tpke" },
-    { "Lane", "Ln" },       { "Court", "Ct" },     { "Place", "Pl" },       { "Circle", "Cir" },      { "Route", "Rt" },
-    { "North", "N" },       { "South", "S" },      { "East", "E" },         { "West", "W" },          { "Northbound", "NB" },
-    { "Southbound", "SB" }, { "Eastbound", "EB" }, { "Westbound", "WB" },   { "Saint", "St" },        { "Mount", "Mt" },
-    { "Center", "Ctr" },    { "Junction", "Jct" },
-  };
-  char t[128];
-  u32 n = 0, ends[24], nw = 0;
-  const char *p = in;
-  while (*p == ' ')
-    p++;
-  while (p[n] && p[n] != '\n')
-    n++;
-  while (n && p[n - 1] == ' ')
-    n--;
-  bool fits = utf8Chars(p, n) <= max && n < cap;
-  n = 0;
-  while (nw < 24) {
+// The short form of w[0..n) in tab, if it is narrower than the word: PRT is wider than Port, CRST than Crest, INLT than Inlet, TRCE
+// than Trace, and HOLW as wide as Hollow; those words stay. 0 = none.
+template <u32 N> inline const char *shortOf(const char *const (&tab)[N][2], const char *w, u32 n) {
+  int i = findWord(tab, w, n);
+  return i >= 0 && textW(tab[i][1], zlen(tab[i][1])) < textW(w, n) ? tab[i][1] : 0;
+}
+inline bool isDirection(const char *w, u32 n) {
+  for (u32 i = 0; i < sizeof kDirection / sizeof kDirection[0]; i++)
+    if (wordIs(w, n, kDirection[i][0]) || wordIs(w, n, kDirection[i][1]))
+      return true;
+  return false;
+}
+// words 0..nw-1 joined by single spaces, each in its short form if it has one; ends[i] = where word i ends. Bytes written (< cap).
+inline u32 joinWords(const char *const *w, const u32 *wl, const char *const *rep, u32 nw, char *t, u32 cap, u32 *ends) {
+  u32 n = 0;
+  for (u32 i = 0; i < nw; i++) {
+    const char *s = rep[i] ? rep[i] : w[i];
+    u32 l = rep[i] ? zlen(rep[i]) : wl[i];
+    if (n && n + 1 < cap)
+      t[n++] = ' ';
+    for (u32 q = 0; q < l && n + 1 < cap; q++)
+      t[n++] = s[q];
+    ends[i] = n;
+  }
+  t[n] = 0;
+  return n;
+}
+// The street made to fit in width (1/1000 em, textW); out holds cap bytes. A street that fits is sent as the iPhone wrote it (its
+// spaces made single). A wider one is shortened the way USPS writes addresses, as far as it takes:
+//   1. the street suffix (the last word that is not a direction, a number or one or two letters: "Highway 101" HWY 101, "Fifth
+//      Avenue South" Fifth AVE S) and the directions (North N, Westbound WB; not one that is the name itself: "North Avenue" North AVE)
+//   2. the words that also stand in front of a name, wherever they are (Mount MT, Fort FT, Point PT, Saint St), and every direction
+//   3. trailing words dropped, never below the first word that is not a direction ("N Martin")
+//   4. what is left cut after its last character that fits
+inline void fitRoad(const char *in, char *out, u32 cap, u32 width) {
+  const char *w[24], *rep[24];
+  u32 wl[24], ends[24], nw = 0;
+  for (const char *p = in; nw < 24;) {
     while (*p == ' ')
       p++;
     if (!*p || *p == '\n')
       break;
-    const char *w = p;
-    u32 wl = 0;
-    while (w[wl] && w[wl] != ' ' && w[wl] != '\n')
-      wl++;
-    p += wl;
-    for (u32 i = 0; i < sizeof kWords / sizeof kWords[0] && !fits; i++)
-      if (sameWord(w, wl, kWords[i][0])) {
-        w = kWords[i][1];
-        for (wl = 0; w[wl];)
-          wl++;
-        break;
+    u32 l = 0;
+    while (p[l] && p[l] != ' ' && p[l] != '\n')
+      l++;
+    w[nw] = p;
+    wl[nw] = l;
+    rep[nw++] = 0;
+    p += l;
+  }
+  char t[128];
+  u32 n = joinWords(w, wl, rep, nw, t, sizeof t, ends);
+  if (textW(t, n) > width || n >= cap) {
+    int suf = -1;
+    for (int i = (int)nw - 1; i >= 0; i--) {
+      if (wl[i] <= 2 || (w[i][0] >= '0' && w[i][0] <= '9') || isDirection(w[i], wl[i]))
+        continue;
+      if (findWord(kSuffix, w[i], wl[i]) >= 0) {  // the suffix, even one that stays (Port): it is not the name
+        rep[i] = shortOf(kSuffix, w[i], wl[i]);
+        suf = i;
       }
-    if (n && n + 1 < sizeof t)
-      t[n++] = ' ';
-    for (u32 q = 0; q < wl && n + 1 < sizeof t; q++)
-      t[n++] = w[q];
-    ends[nw++] = n;
-  }
-  t[n] = 0;
-  u32 keep = nw;
-  while (keep > 1 && utf8Chars(t, ends[keep - 1]) > max)
-    keep--;
-  u32 len = nw ? ends[keep - 1] : 0, c = 0, i = 0;
-  for (; i < len; i++) {  // one word longer than max: cut before the character max + 1
-    if (((u8)t[i] & 0xc0) != 0x80 && ++c > max)
       break;
+    }
+    u32 names = 0;
+    for (u32 i = 0; i < nw; i++)
+      names += (int)i != suf && !isDirection(w[i], wl[i]);
+    for (u32 i = 0; i < nw && names; i++)
+      if (const char *a = shortOf(kDirection, w[i], wl[i]))
+        rep[i] = a;
+    n = joinWords(w, wl, rep, nw, t, sizeof t, ends);
+    if (textW(t, n) > width) {
+      for (u32 i = 0; i < nw; i++) {
+        if (!rep[i])
+          rep[i] = shortOf(kPrefix, w[i], wl[i]);
+        if (!rep[i])
+          rep[i] = shortOf(kDirection, w[i], wl[i]);
+      }
+      n = joinWords(w, wl, rep, nw, t, sizeof t, ends);
+    }
+    u32 first = 1, keep = nw;
+    while (first < nw && isDirection(w[first - 1], wl[first - 1]))
+      first++;
+    while (keep > first && textW(t, ends[keep - 1]) > width)
+      keep--;
+    n = keep ? ends[keep - 1] : 0;
+    u32 sum = 0, i = 0;
+    for (; i < n; i++) {  // a continuation byte adds 0: the cut falls before a character, never inside one
+      u32 cw = leadW((u8)t[i]);
+      if (sum + cw > width)
+        break;
+      sum += cw;
+    }
+    n = i;
   }
-  len = i < cap ? i : cap - 1;
-  while (len && ((u8)t[len] & 0xc0) == 0x80)  // never half a character
-    len--;
-  for (i = 0; i < len; i++)
+  if (n >= cap)
+    n = cap - 1;
+  while (n && ((u8)t[n] & 0xc0) == 0x80)  // never half a character
+    n--;
+  while (n && t[n - 1] == ' ')
+    n--;
+  for (u32 i = 0; i < n; i++)
     out[i] = t[i];
-  out[len] = 0;
+  out[n] = 0;
 }
-// the iPhone's guidance (rgview.h) -> the KOMBI's maneuver: direction, street (shortRoad; never "": the template's own street would
-// stay; a highway exit's number in front), distance number + unit from the iPhone's text ("450 m"; without text whole metres, "0 m"
+// iAP2 maneuver types that leave a road at a numbered exit, when the iPhone names one: off ramps (8, 22, 23), keep left / right (13,
+// 14), slight left / right (49, 50) and highway changes (51..53)
+inline bool exitManeuver(u32 type) {
+  return type == 8 || type == 13 || type == 14 || type == 22 || type == 23 || (type >= 49 && type <= 53);
+}
+// the iPhone's guidance (rgview.h) -> the KOMBI's maneuver: direction, street (fitRoad; never "": the template's own street would
+// stay; an exit's number in front), distance number + unit from the iPhone's text ("450 m"; without text whole metres, "0 m"
 // with nothing), lanes (none rather than a lane the KOMBI cannot draw)
 inline void manOf(const rg_view &v, Man &m) {
   memset(&m, 0, sizeof m);
   m.dir = direction(v.type, v.angle, v.side);
   m.roadFb = v.roadfb != 0;
-  u32 max = g_roadMax ? g_roadMax : kRoadMax;
+  u32 width = roadWidth();
   {
     char r[96];
-    shortRoad(v.road, r, sizeof r, max);
+    fitRoad(v.road, r, sizeof r, width);
     copyText(m.road, sizeof m.road, r[0] ? r : " ");
   }
   char num[16] = "", unit[8] = "";
@@ -1186,16 +1345,19 @@ inline void manOf(const rg_view &v, Man &m) {
   copyText(m.dist, sizeof m.dist, num);
   if (m.unit < 0)
     m.unit = kUnitM;
-  if (v.exitno[0] && (m.dir == kHwyOutLeft || m.dir == kHwyOutRight)) {  // "Exit 23B  I-95 N": the number, then the road
+  // An exit (an off ramp, or a keep / slight / highway change the iPhone gives an exit number): "Exit 104  Jefferson Davis HWY". The
+  // exit number always whole, then the road fitted into the width left (none with less than kRoadMinW)
+  if (v.exitno[0] && exitManeuver(v.type)) {
     char t[96];
     u32 k = 0;
     for (const char *q = "Exit "; *q; q++)
       t[k++] = *q;
     for (const char *q = v.exitno; *q && k < 20; q++)
       t[k++] = *q;
-    if (!v.roadfb && v.road[0] && v.road[0] != ' ' && max > k + 6) {  // the maneuver's road only, not the one the car is on
+    u32 used = textW(t, k) + 2 * leadW(' ');
+    if (!v.roadfb && v.road[0] && v.road[0] != ' ' && used + kRoadMinW <= width) {  // the maneuver's road only, not the car's
       char r[96];
-      shortRoad(v.road, r, sizeof t - k - 2, max - k - 2);
+      fitRoad(v.road, r, sizeof t - k - 2, width - used);
       if (r[0]) {
         t[k++] = ' ';
         t[k++] = ' ';
@@ -1206,6 +1368,8 @@ inline void manOf(const rg_view &v, Man &m) {
     t[k] = 0;
     copyText(m.road, sizeof m.road, t);
   }
+  if (g_ruler)  // kombi_road_ruler: the row of digits whatever the maneuver, to read the HUD's width off it
+    copyText(m.road, sizeof m.road, kRuler);
   m.hasStep = true;
   m.metres = v.dist;
   if (v.nl && v.nl <= kLaneMax) {
@@ -1223,6 +1387,11 @@ inline void manOf(const rg_view &v, Man &m) {
   }
 }
 
+// The lane row on the same maneuver (1.3.1). iOS's lane data drops out for a moment (the lane index moves on before its lane set
+// arrives, LaneGuidanceShowing off between two lane events) and a row that went was sent again when it came back, each change at
+// most every 3 s: on the cluster the row went off and on. A row that goes now stays kLaneGapMs, and a new row is sent once it has
+// been the same on two ticks in a row (500 ms apart).
+const u32 kLaneGapMs = 2500;
 struct Output {
   Graph g;
   Client c;
@@ -1232,6 +1401,9 @@ struct Output {
   char lastRoad[96], lastDist[16];
   Lanes lastLanes;
   u32 tGraph, tPos, lastPos, retryAt;
+  Lanes candLanes;  // a new lane row seen once
+  bool candValid, lanesGone;
+  u32 tLanesGone;
 
   void init() {
     g.init();
@@ -1248,6 +1420,9 @@ struct Output {
     lastRoad[0] = lastDist[0] = 0;
     lastLanes.n = 0;
     tGraph = tPos = lastPos = 0;
+    candValid = lanesGone = false;
+    candLanes.n = 0;
+    tLanesGone = 0;
   }
   void log(const char *fmt, const char *a = "", const char *b2 = "") {
     if (!g_log)
@@ -1384,8 +1559,14 @@ struct Output {
     // A new street alone redraws the whole graph (the cluster blinks): only the maneuver's own street does, and not within 4 s of
     // the last graph; the car's current road (the maneuver names none) changes as it drives and redraws nothing.
     bool same = shown && m.dir == lastDir && (eq(m.road, lastRoad) || m.roadFb || now - tGraph < 4000);
-    if (!same || (!sameLanes(m.lanes, lastLanes) && now - tGraph >= 3000)) {
-      if (showManeuver(m, now) && g_debug && g_debug()) {
+    static Man mm;  // m with the lane row as it is to be shown (kLaneGapMs, two ticks)
+    mm = m;
+    if (same)
+      steadyLanes(mm, now);
+    else
+      candValid = lanesGone = false;
+    if (!same || (!sameLanes(mm.lanes, lastLanes) && now - tGraph >= 3000)) {
+      if (showManeuver(mm, now) && g_debug && g_debug()) {
         char d[24];
         d[0] = '0' + (char)(m.dir / 10 % 10);
         d[1] = '0' + (char)(m.dir % 10);
@@ -1415,6 +1596,32 @@ struct Output {
     }
     if (lastLanes.n)
       feed(m, now, false);
+  }
+  // the lane row to show for the maneuver already shown: the last one through a gap shorter than kLaneGapMs, a new one only when
+  // seen on two ticks in a row (until then the last one)
+  void steadyLanes(Man &m, u32 now) {
+    if (!m.lanes.n) {
+      candValid = false;
+      if (!lastLanes.n)
+        return;
+      if (!lanesGone) {
+        lanesGone = true;
+        tLanesGone = now;
+      }
+      if (now - tLanesGone < kLaneGapMs)
+        m.lanes = lastLanes;
+      return;
+    }
+    lanesGone = false;
+    if (sameLanes(m.lanes, lastLanes)) {
+      candValid = false;
+      return;
+    }
+    if (candValid && sameLanes(m.lanes, candLanes))
+      return;  // seen twice: the new row goes out (at most every 3 s, tick)
+    candLanes = m.lanes;
+    candValid = true;
+    m.lanes = lastLanes;
   }
 };
 

@@ -3,10 +3,11 @@
      (focus ID 8195 of ST_Ent_Selection, state 20) with the HMI's "entry button everywhere": applicationType Custom + insertStateID
      + insertAfterFocusID. Options are checkboxes (raAction + raBoolModel), submenus are buttons with an hmiAction, the sensitivity
      levels radio buttons (raBoolModel, set by the plugin). Texts in CarPlayMenu_ALL_Texts.zip (src/texts.py).
-       20 CarPlay Advanced Settings: Full-screen CarPlay, CarPlay directions in HUD, HUD effects >, iDrive control >,
-          Restart to apply
-       81   HUD effects: Fill toward the turn, Blink near the turn, Effect colour >
+       20 CarPlay Advanced Settings: Full-screen CarPlay, CarPlay directions in HUD, HUD effects >, Car and HUD type >,
+          Restart CarPlay, iDrive control >, Restart to apply
+       81   HUD effects: Effect colour >, Fill toward the turn, Blink near the turn, HUD debug log
        93     Effect colour: Orange, Grey, White
+      121   Car and HUD type: Automatic, BMW 6WA cluster, BMW 6WB cluster, BMW 6WB cluster + HUD, MINI
        41   iDrive control: Enable knob tilts, Touchpad >, Enable rotation as zoom
        44     Touchpad: Enable touchpad, Tap touchpad as click, Touchpad sensitivity >, Two fingers tap to back
        50       Touchpad sensitivity: Low, Medium, High -->
@@ -42,6 +43,13 @@
       <raAction id="97"/>
       <raAction id="98"/>
       <raAction id="108"/>
+      <hmiAction id="120" target="121"/>
+      <raAction id="124"/>
+      <raAction id="125"/>
+      <raAction id="126"/>
+      <raAction id="127"/>
+      <raAction id="128"/>
+      <raAction id="144"/>
     </actions>
     <models>
       <textIdModel id="10" textId="1"><synonyms/></textIdModel>
@@ -83,6 +91,18 @@
       <raBoolModel id="101"/>
       <raBoolModel id="109"/>
       <textIdModel id="110" textId="25"><synonyms/></textIdModel>
+      <textIdModel id="122" textId="26"><synonyms/></textIdModel>
+      <textIdModel id="134" textId="27"><synonyms/></textIdModel>
+      <textIdModel id="135" textId="28"><synonyms/></textIdModel>
+      <textIdModel id="136" textId="29"><synonyms/></textIdModel>
+      <textIdModel id="137" textId="30"><synonyms/></textIdModel>
+      <textIdModel id="138" textId="31"><synonyms/></textIdModel>
+      <raBoolModel id="129"/>
+      <raBoolModel id="130"/>
+      <raBoolModel id="131"/>
+      <raBoolModel id="132"/>
+      <raBoolModel id="133"/>
+      <textIdModel id="145" textId="32"><synonyms/></textIdModel>
     </models>
     <events/>
     <hmiStates>
@@ -91,6 +111,8 @@
           <checkbox action="5" id="21" model="12" text="" textModel="11"/>
           <checkbox action="8" id="24" model="19" text="" textModel="15"/>
           <button action="80" id="83" model="82" text=""/>
+          <button action="120" id="123" model="122" text=""/>
+          <button action="144" id="146" model="145" text=""/>
           <button action="40" id="70" model="42" text=""/>
           <button action="9" id="25" model="16" text=""/>
         </components>
@@ -112,10 +134,19 @@
       </hmiState>
       <hmiState id="81" text="HUD effects" textModel="82">
         <components>
+          <button action="92" id="95" model="94" text=""/>
           <checkbox action="84" id="87" model="85" text="" textModel="86"/>
           <checkbox action="88" id="91" model="89" text="" textModel="90"/>
-          <button action="92" id="95" model="94" text=""/>
           <checkbox action="108" id="111" model="109" text="" textModel="110"/>
+        </components>
+      </hmiState>
+      <hmiState id="121" text="Car and HUD type" textModel="122">
+        <components>
+          <radiobutton action="124" id="139" model="129" text="" textModel="134"/>
+          <radiobutton action="125" id="140" model="130" text="" textModel="135"/>
+          <radiobutton action="126" id="141" model="131" text="" textModel="136"/>
+          <radiobutton action="127" id="142" model="132" text="" textModel="137"/>
+          <radiobutton action="128" id="143" model="133" text="" textModel="138"/>
         </components>
       </hmiState>
       <hmiState id="93" text="Effect colour" textModel="94">

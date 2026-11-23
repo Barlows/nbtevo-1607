@@ -17,8 +17,8 @@ log() { echo "CarPlayMenu: restart.sh: $*" >> $LOG; }
 if [ -e /dev/starter ]; then
   sleep 1                                          # let the plugin's handler return first
   if [ -f $P/libcpreboot.so ]; then
-    log "rebooting the head unit (the links are made again by boot.sh at boot)"
-    LD_PRELOAD=$P/libcpreboot.so /bin/cat < /dev/null
+    log "restarting the head unit: ECU reset over HSFZ, else sysmgr_reboot (the links are made again by boot.sh at boot)"
+    CPREBOOT_HSFZ=1 LD_PRELOAD=$P/libcpreboot.so /bin/cat < /dev/null 2>> $LOG
     log "reboot failed (libcpreboot.so returned)"
   else
     log "libcpreboot.so missing: not rebooted; restart the head unit to apply"

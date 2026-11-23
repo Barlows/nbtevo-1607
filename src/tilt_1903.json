@@ -1,0 +1,110 @@
+{
+ "hmi": "1903-490 Build 41",
+ "name": "carplay_tilt_1903",
+ "what": "carplay_tilt (see tilt_1703.json) for HMI ID5_1903-490-1837J Build 41 (NBTevo_ID5_1903_Release, HmiMain3D sha256 027cf939...; BMW F25 X3 issue #9, BMW F36 issue #10, head unit NBTevo_Q18491I). CCarPlayActivity::handleControllerInput is at 0x44e644; every patched place has the same instructions at the same distances as in 1703 Build 139, except that the compiler keeps \"pressed\" in r7 (1703: r8), so the two words that store it use r7.",
+ "how": [
+  "0x44ea14..0x44ea1c: the key filter becomes 9..14 (bhi to the same exit 0x44eca4)",
+  "0x44ec08: tilt left no longer sets the Back field",
+  "0x44f2ac: skips the trace printf: b 0x44ebf4",
+  "0x44ebb4..0x44ebe4: zero the four direction words, store \"pressed\" (r7) in the one of key-9, Voice field (moveq r5, r7) as before, b 0x44ec54 (the send call)",
+  "0x44ec30: b 0x44ebb4 instead of the original argument setup",
+  "Found by the installer's HMI scan (tA, tB, tC windows; the pressed register taken from moveq r5, r7 at tB+0x84) and checked instruction by instruction against the stock file."
+ ],
+ "words": [
+  {
+   "addr": "0x44ea14",
+   "orig": "e355000e",
+   "new": "e245c009"
+  },
+  {
+   "addr": "0x44ea18",
+   "orig": "1355000d",
+   "new": "e35c0005"
+  },
+  {
+   "addr": "0x44ea1c",
+   "orig": "1a0000a0",
+   "new": "8a0000a0"
+  },
+  {
+   "addr": "0x44ebb4",
+   "orig": "e59f0750",
+   "new": "e3a0c000"
+  },
+  {
+   "addr": "0x44ebb8",
+   "orig": "e1a01005",
+   "new": "e58dc000"
+  },
+  {
+   "addr": "0x44ebbc",
+   "orig": "e1a02009",
+   "new": "e58dc004"
+  },
+  {
+   "addr": "0x44ebc0",
+   "orig": "e1a0300a",
+   "new": "e58dc008"
+  },
+  {
+   "addr": "0x44ebc4",
+   "orig": "e58d7000",
+   "new": "e58dc00c"
+  },
+  {
+   "addr": "0x44ebc8",
+   "orig": "ebf709f6",
+   "new": "e245c009"
+  },
+  {
+   "addr": "0x44ebcc",
+   "orig": "e51b002c",
+   "new": "e35c0003"
+  },
+  {
+   "addr": "0x44ebd0",
+   "orig": "e5d03014",
+   "new": "978d710c"
+  },
+  {
+   "addr": "0x44ebd4",
+   "orig": "e3130004",
+   "new": "e355003a"
+  },
+  {
+   "addr": "0x44ebd8",
+   "orig": "0a000005",
+   "new": "01a05007"
+  },
+  {
+   "addr": "0x44ebdc",
+   "orig": "e1a03009",
+   "new": "13a05000"
+  },
+  {
+   "addr": "0x44ebe0",
+   "orig": "e59f1724",
+   "new": "e58d5010"
+  },
+  {
+   "addr": "0x44ebe4",
+   "orig": "e1a02005",
+   "new": "ea00001a"
+  },
+  {
+   "addr": "0x44ec08",
+   "orig": "03833001",
+   "new": "e320f000"
+  },
+  {
+   "addr": "0x44ec30",
+   "orig": "e355003a",
+   "new": "eaffffdf"
+  },
+  {
+   "addr": "0x44f2ac",
+   "orig": "e51b302c",
+   "new": "eafffe50"
+  }
+ ]
+}

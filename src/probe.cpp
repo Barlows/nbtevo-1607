@@ -12,6 +12,12 @@
 //       MOST HUDTerminal's (RG_MOST_MARKER, librghook-most / -both): the factory's end-of-route state (hud.h drawClear, through our own
 //       MOST client). Then the marker goes. Logged to /var/iap/rghook.log. A newer session's marker is left alone.
 //   CPM_KOMBI_ADDR=a.b.c.d:port   another KOMBI address (tests)
+#ifdef KOMBI_HOST
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#else
 extern "C" {
 char *getenv(const char *);
 int open(const char *, int, ...);
@@ -21,6 +27,7 @@ int unlink(const char *);
 void _exit(int);
 int snprintf(char *, unsigned long, const char *, ...);
 }
+#endif
 #include "kombi.h"
 #include "rgview.h"
 #ifndef KOMBI_HOST

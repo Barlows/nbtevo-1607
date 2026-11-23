@@ -43,7 +43,7 @@ int main(int argc, char **argv) {          // type angle side [jtype a1 a2 ...]:
     return 0;
   }
   for (unsigned i = 0; i < s.n; i++) {
-    hud::Pt q[8]; unsigned k = s.k[i]; for (unsigned j = 0; j < k; j++) q[j] = s.p[i][j];
+    hud::Pt q[hud::kPiecePts]; unsigned k = s.k[i]; /* up to 10 points after applyFill */ for (unsigned j = 0; j < k; j++) q[j] = s.p[i][j];
     if (mini && (k = hud::toMini(q, k)) < 3) continue;
     printf("%d", s.t[i]); for (unsigned j = 0; j < k; j++) printf(" %d,%d", q[j].x, q[j].y); printf("\n");
   }

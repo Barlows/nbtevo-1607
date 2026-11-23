@@ -70,6 +70,7 @@ class RgHookReroute(unittest.TestCase):
         self.assertEqual(out['maneuver_road'], 'Oak Avenue')
         self.assertEqual(out['dist_to_maneuver'], '160')
         self.assertEqual(out['dist_to_maneuver_string'], '150 m')
+        self.assertEqual(out['maneuver_step_length'], '160')
 
     def test_units(self):
         self.assertEqual(self.reroute(units=4)['dist_to_maneuver_string'], '550 ft')

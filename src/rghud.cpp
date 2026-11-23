@@ -7,7 +7,10 @@
 //     guidance from the routeguidance file this library writes, the BMW navigation's priority, the test switches); a MOST client in a
 //     process of its own is what NBT-AAD's daemon does too.
 //   * rghook.c calls rgh_kick() when the iPhone's link is up and after every route-guidance message; the first starts hud.h (its
-//     threads; mm-ipod's never wait on MOST), so its test channel and "HUD debug log" work with no route too.
+//     threads; mm-ipod's never wait on MOST), so its test channel and "HUD debug log" work with no route too. Since 1.4.4 from a
+//     thread of its own at priority 10 at most (as the KOMBI worker): hud::enable's set-up (the switch files, dlopen of the DSI
+//     library, the MOST connection) used to run on mm-ipod's iAP2 reader thread right after the iPhone authenticated, holding the
+//     link, and hud.h's threads inherited that thread's priority.
 //     "CarPlay directions in HUD" is on by being here: the mm-ipod wrapper preloads this library only while hud_guidance is set.
 //   * mm-ipod lives for one CarPlay session: while hud.h shows a picture, RG_MOST_MARKER holds our pid, and the watcher
 //     (rg_watch_once, rghook.c) has libcpprobe.so clear the HUDTerminal if mm-ipod ended with it still up.
@@ -55,8 +58,15 @@ bool debugLog() {  // rghook.c's cached switch debug_log
   return rg_debug_log() != 0;
 }
 
-// the marker follows hud.h's picture: written when one goes up, removed when hud.h clears it
+// hud.h started from here, then the marker: it follows hud.h's picture (written when one goes up, removed when hud.h clears it)
 void *markThread(void *) {
+  int prio = rg_lower_priority(10);  // hud.h's threads (MOST client, drawing) are made from this one and inherit it
+  if (prio > 10) {
+    char b[96];
+    snprintf(b, sizeof b, "most: HUD threads at priority 10 (the iAP2 reader thread's was %d)", prio);
+    rg_log_line(b);
+  }
+  hud::enable(true);
   char mine[16];
   snprintf(mine, sizeof mine, "%d\n", getpid());
   bool was = false;
@@ -82,8 +92,9 @@ extern "C" void rgh_kick(void) {
   hud::g_log = rg_log_line;
   hud::g_debug = debugLog;
   rg_log_line("most: CarPlay directions on the MOST HUDTerminal, from mm-ipod (no menu plugin)");
-  hud::enable(true);
   int t;
-  if (pthread_create(&t, 0, markThread, 0) != 0)
-    rg_log_line("most: marker thread failed");
+  if (pthread_create(&t, 0, markThread, 0) != 0) {
+    rg_log_line("most: start thread failed: started here");
+    hud::enable(true);
+  }
 }

@@ -22,11 +22,16 @@ HARNESS = r'''
 extern int open(const char *, int, ...); extern int close(int); extern long write(int, const void *, unsigned long);
 extern int unlink(const char *); extern int rename(const char *, const char *); extern int printf(const char *, ...);
 extern long strtol(const char *, char **, int);
-static int mac_open(const char *p, int f, ...) { return f ? open(p, 0x601 /* O_WRONLY|O_CREAT|O_TRUNC */, 0644) : open(p, 0); }
+#ifdef __APPLE__
+#define HOST_WCT 0x601 /* O_WRONLY|O_CREAT|O_TRUNC on the Mac */
+#else
+#define HOST_WCT 0x241 /* ... on Linux */
+#endif
+static int mac_open(const char *p, int f, ...) { return f ? open(p, HOST_WCT, 0644) : open(p, 0); }
 static long mac_write(int fd, const void *b, size_t n) { return write(fd, b, n); }
 static int hexv(char c) { return c >= '0' && c <= '9' ? c - '0' : c - 'a' + 10; }
 int main(int argc, char **argv) {          // message id (hex) and its parameters (hex), one pair per argument pair
-  r_open = mac_open; r_write = (long (*)(int, const void *, size_t))mac_write; r_close = close; r_unlink = unlink; r_rename = rename;
+  r_open = mac_open; r_write = (long (*)(int, const void *, size_t))mac_write; r_close = close; r_unlink = unlink;
   inited = 1; logfd = -1;
   for (int i = 1; i + 1 < argc; i += 2) {
     static u8 b[4096]; u32 n = 0; const char *h = argv[i + 1];
@@ -58,6 +63,15 @@ def update(lane_idx=None, showing=None):
     if showing is not None:
         m += tlv(18, bytes([showing]))
     return m
+
+
+def maneuver(idx, road, mtype=2):
+    return tlv(0, struct.pack('>H', 0x0F0E)) + tlv(1, struct.pack('>H', idx)) + tlv(3, bytes([mtype])) + tlv(4, road.encode() + b'\0')
+
+
+def current(*idx):
+    """a RouteGuidanceUpdate with the current maneuver list (the first is the current one)"""
+    return tlv(0, struct.pack('>H', 0x0F0E)) + tlv(1, b'\x01') + tlv(13, b''.join(struct.pack('>H', i) for i in idx))
 
 
 class RgHookLanes(unittest.TestCase):
@@ -112,6 +126,29 @@ class RgHookLanes(unittest.TestCase):
         got = self.run_msgs((0x5204, many), (0x5201, update(0, 1)))['lanes'].split(';')
         self.assertEqual(len(got), 8)
         self.assertEqual(got[0], '1/1000/0,10,20,30')
+
+    def test_lane_sets_of_a_long_route(self):
+        # iOS sends every lane set of the route at its start, each index once (mib2q-carplay-rgi); until 1.3.1 they went into
+        # index % 8 slots: index 3's set was gone once index 11 had arrived, and came back only when sent again
+        sets = [(0x5204, lanes_msg(i, lane(0, 1, [i % 90]), lane(1, 0, [0]))) for i in range(20)]
+        self.assertEqual(self.run_msgs(*sets, (0x5201, update(3, 1)))['lanes'], '1/1000/3;0/1000/0')
+        out = self.run_msgs(*sets, (0x5201, update(3, 1)), *sets, (0x5201, update(4, 1)))     # the batch again: all still there
+        self.assertEqual(out['lanes'], '1/1000/4;0/1000/0')
+
+    def test_maneuvers_of_a_long_route(self):
+        # until 1.3.1: index % 32 slots, so on a route of 40 maneuvers the arrow for maneuver 2 came from maneuver 34
+        mans = [(0x5202, maneuver(i, 'Road %d' % i)) for i in range(40)]
+        out = self.run_msgs(*mans, (0x5201, current(2, 3)))
+        self.assertEqual((out['maneuver_index'], out['maneuver_road']), ('2', 'Road 2'))
+
+    def test_maneuver_store_full(self):
+        # 140 maneuvers: the first 128 are kept (the farthest ones dropped), and a passed one makes room for a new one
+        mans = [(0x5202, maneuver(i, 'Road %d' % i)) for i in range(140)]
+        self.assertEqual(self.run_msgs((0x5201, current(0, 1)), *mans, (0x5201, current(127, 128)))['maneuver_road'], 'Road 127')
+        self.assertEqual(self.run_msgs((0x5201, current(0, 1)), *mans, (0x5201, current(130, 131)))['maneuver_road'], '')
+        out = self.run_msgs((0x5201, current(0, 1)), *mans, (0x5201, current(100, 101)), (0x5202, maneuver(130, 'Late Road')),
+                            (0x5201, current(130, 131)))
+        self.assertEqual(out['maneuver_road'], 'Late Road')
 
 
 if __name__ == '__main__':

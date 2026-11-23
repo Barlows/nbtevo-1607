@@ -5,7 +5,7 @@ tools (uname, pidin, on, mount, df, sync, OnOffDSICommander) and ssh are simulat
 The ssh stand-in runs the remote command locally, as the head unit would (landing on hu-jacinto unless TEST_LAND says otherwise).
 Every test runs under /bin/sh and under ksh (the head unit's shell is a ksh).
 """
-import hashlib, os, shlex, shutil, struct, subprocess, tempfile, unittest, urllib.parse, zipfile
+import hashlib, json, os, re, shlex, shutil, struct, subprocess, tempfile, unittest, urllib.parse, zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -183,9 +183,14 @@ class Base(object):
         return self.calls_file.read_text().splitlines() if self.calls_file.exists() else []
 
     def backups(self, action=None):
+        # <date>-<time>-<pid>-<action>, in the order they were made: the pid as a number (two runs in one second whose pids cross a
+        # digit boundary, 9864 then 10012, sorted the wrong way round as text)
+        def key(d):
+            f = d.name.split('-')
+            return (f[0], f[1], int(f[2])) if len(f) >= 4 and f[2].isdigit() else (d.name, '', 0)
         b = self.p['BACKUPS']
-        return sorted(d for d in b.iterdir() if d.name != 'originals' and (action is None or d.name.endswith('-' + action))) \
-            if b.exists() else []
+        return sorted((d for d in b.iterdir() if d.name != 'originals' and (action is None or d.name.endswith('-' + action))),
+                      key=key) if b.exists() else []
 
     def assert_plugin(self, tag=b'new'):
         src = self.pl
@@ -254,6 +259,51 @@ class InstallTest(Base):
         # boot hook added and the relink made mm-ipod a link to the wrapper
         self.assertEqual(self.hooked(), 1)
         self.assertTrue(self.p['MMIPOD'].is_symlink())
+
+    def test_hud_update_leaves_no_empty_file_and_keeps_the_hud_settings(self):
+        # CarPlay Advanced Installer app 1.6.4, 2026-11-19: a turn-by-turn update over 1.3.1 completed, then the app stopped copying
+        # the backup to the phone at "Backup read failed: <backup>/settings/hud_guidance": the empty switch file the installer up to
+        # 1.3.2 wrote, in the earlier settings folder the update moves into the backup. 1.3.3 writes the switch as "1" (as the menu
+        # does) and fills an empty one first; and a turn-by-turn update keeps the menu's HUD settings, as the plan line said it would
+        self.run_script('install', '--kind', 'id6', '--mode', 'hud')
+        s = self.p['SETTINGS']
+        self.assertEqual((s / 'hud_guidance').read_text(), '1\n')
+        (s / 'hud_guidance').write_bytes(b'')                          # as 1.3.2 left it
+        kept = {'hud_fill': '1', 'hud_colour': '2\n', 'hud_debug': '1', 'debug_log': '1', 'hud_handles': '1 2 3 4 5 6\n',
+                'kombi_road_max': '16\n', 'kombi_road_ruler': '1'}                    # 1.3.5: the KOMBI street's width too
+        for n, v in kept.items():
+            (s / n).write_text(v)
+        (s / 'fullscreen').write_text('1')                              # a full install's switch: not part of a turn-by-turn one
+        before = set(self.p['BACKUPS'].glob('*'))
+        out = self.run_script('install', '--kind', 'id6', '--mode', 'hud')
+        self.assertIn('SUCCESS: install completed', out)
+        self.assertIn('hud_guidance was empty', out)
+        self.assertIn('HUD settings kept', out)
+        new = [b for b in self.p['BACKUPS'].glob('*') if b not in before and b.is_dir()]
+        self.assertEqual(len(new), 1)
+        empty = [str(f) for f in new[0].rglob('*') if f.is_file() and f.stat().st_size == 0]
+        self.assertEqual(empty, [])                                     # the phone app copies every file of it
+        self.assertEqual((new[0] / 'settings' / 'hud_guidance').read_text(), '1\n')
+        self.assertEqual((s / 'hud_guidance').read_text(), '1\n')
+        for n, v in kept.items():
+            self.assertEqual((s / n).read_text(), v, n)
+        self.assertFalse((s / 'fullscreen').exists())
+        self.assertEqual((new[0] / 'settings' / 'fullscreen').read_text(), '1')
+
+    def test_full_update_and_uninstall_leave_no_empty_file(self):
+        # the same empty hud_guidance in a full install's settings: copied to <backup>/settings-copy by an update, moved to
+        # <backup>/settings by an uninstall; the phone app copies both backups
+        self.run_script('install')
+        self.p['SETTINGS'].mkdir(parents=True, exist_ok=True)
+        (self.p['SETTINGS'] / 'fullscreen').write_text('1')
+        for args in (('install',), ('uninstall',)):
+            (self.p['SETTINGS'] / 'hud_guidance').write_bytes(b'')
+            before = set(self.p['BACKUPS'].glob('*'))
+            out = self.run_script(*args)
+            new = [b for b in self.p['BACKUPS'].glob('*') if b not in before and b.is_dir()]
+            self.assertEqual(len(new), 1, out)
+            self.assertEqual([str(f) for f in new[0].rglob('*') if f.is_file() and f.stat().st_size == 0], [], args)
+            self.assertIn('hud_guidance was empty', out)
 
     def test_install_hud_through_a_linked_rw(self):
         # iDrive 5 (HMI 1803): /var/opt/hmi/data/rw is a link to the disk folder, and a first install has no Plugins/ there. QNX
@@ -818,8 +868,8 @@ class FromComputerTest(Base):
         self.assertTrue((pre / ('folders' + str(self.p['SETTINGS'])) / 'bin' / 'mm-ipod').is_file())   # its original
 
     def test_second_hud_install_on_top_of_one(self):
-        # a second --hud on top of one stopped at "mm-ipod is missing or already a link" (issue #9): the wrapper now gets the
-        # original the first install kept
+        # issue #9 (F25 X3, 1.2.4 in the car): a second --hud on top of one stopped at "mm-ipod is missing or already a link"; the
+        # wrapper now gets the original kept by the first install
         original = self.p['MMIPOD'].read_bytes()
         self.computer('install', '--hud')
         self.assertTrue(self.p['MMIPOD'].is_symlink())
@@ -829,7 +879,7 @@ class FromComputerTest(Base):
         self.assertIn('Done: CarPlay Advanced Settings is installed', out)
         self.assertTrue(self.p['MMIPOD'].is_symlink())
         self.assertEqual((self.p['SETTINGS'] / 'bin' / 'mm-ipod').read_bytes(), original)
-        self.computer('uninstall')
+        self.computer('uninstall')                                     # (on the car the original shows again once the link is gone)
         self.assertFalse(self.p['MMIPOD'].is_symlink())
 
     def test_failed_copy_stops_before_the_upload(self):
@@ -858,6 +908,39 @@ class FromComputerTest(Base):
         self.assertIn('sh carplay-advanced.sh restart', out)                           # no terminal: how to restart later
         self.assertTrue((self.p['PLUGIN'] / 'libcpreboot.so').is_file())               # "restart" works without OnOffDSICommander
 
+    def test_hud_install_on_a_reported_id6_build(self):
+        # issue #11: HMI 2211 (iDrive 6, BMW F30) took the turn-by-turn install; it is listed in hud_reports, so no request for a report
+        sig = bytes.fromhex('711c09e308009015003090e50c3093e533ff2fe1000050e30150a013')
+        self.p['HMI_VERSION_FILE'].write_bytes(b'NBTevo_ID5_2211_Release ID5_2211-490-2222A Build 13')
+        self.p['HMI_BIN'].write_bytes(elf(b'iDrive 6 HMI ' + sig + b' rest', etype=2))
+        out = self.computer('install')
+        self.assertIn('Head unit: iDrive 6, NBTevo_ID5_2211_Release ID5_2211-490-2222A Build 13', out)
+        self.assertIn('Install mode: hud', out)
+        self.assertIn('reported with the turn-by-turn directions (BMW F30 (2016), iDrive 6, MOST HUDTerminal, issue #11)', out)
+        self.assertNotIn('not in the supported list', out)
+        self.assertNotIn('https://github.com/', out)
+        self.assertTrue(self.p['MMIPOD'].is_symlink())                                # the directions wrapper is in
+
+    def test_hud_install_on_an_unreported_build_asks_for_a_report(self):
+        self.p['HMI_VERSION_FILE'].write_bytes(b'NBTevo_ID5_2399_Release ID5_2399-490-0000A Build 1')
+        self.p['HMI_BIN'].write_bytes(b'HmiMain3D other')
+        out = self.computer('install', '--hud')
+        self.assertIn('has not been reported with the turn-by-turn directions yet', out)
+        self.assertTrue(self.p['MMIPOD'].is_symlink())                                # not a reason to stop
+        q = self.issue_link(out)
+        self.assertEqual(q['title'], ['HUD report: HMI NBTevo_ID5_2399_Release ID5_2399-490-0000A Build 1'])
+        body = q['body'][0].splitlines()
+        self.assertIn('HmiMain3D sha256: %s' % sha(b'HmiMain3D other'), body)
+        self.assertIn('libconn_carplay.so sha256: %s' % sha(CONN), body)
+        self.assertIn('mm-ipod sha256: %s' % sha(elf(b'mm-ipod', etype=2)), body)
+
+    def test_hud_reported_ignores_the_padding(self):
+        res = subprocess.run([self.SHELL, '-c', 'eval "$(sed -n "/^hud_reports() {/,/^}/p;/^hud_reported() {/,/^}/p" "$1")"; '
+                              'hud_reported "NBTevo_ID5_2211_Release ID5_2211-490-2222A Build 13"; '
+                              'hud_reported "NBTevo_ID5_2211_Release ID5_2211-490-2222A Build 1"; echo end', 'sh', str(self.script)],
+                             capture_output=True, text=True, check=True)
+        self.assertEqual(res.stdout, 'BMW F30 (2016), iDrive 6, MOST HUDTerminal, issue #11\nend\n')
+
     def test_restart_does_not_wait_for_the_dropped_connection(self):
         # a real reboot leaves the SSH session hanging until a timeout: the installer stops once the head unit says it restarts
         import time
@@ -867,8 +950,8 @@ class FromComputerTest(Base):
         self.assertIn('The head unit is restarting', out)
 
     def test_restart_after_install_runs_the_uploaded_script(self):
-        # the restart after an install runs the uploaded script, never a script streamed into "/bin/sh -s" (QNX's sh reads a pipe
-        # one byte at a time, a round trip each through on -f: issue #12, BMW F31, never reached the reboot)
+        # issue #12 (BMW F31): the restart after an install streamed the script into "/bin/sh -s", which QNX's sh reads one byte at a
+        # time (each a round trip through on -f): it never reached the reboot within the wait. Now it is uploaded and run as a file.
         cmds = self.root / 'cmds'
         for extra in (('--restart-hmi',), ('--hud', '--restart-hmi')):
             with self.subTest(extra=extra):
@@ -894,7 +977,7 @@ class FromComputerTest(Base):
         self.assertNotIn('ERROR', out)
         self.assertTrue(any((self.root / 'BACKUP').glob('*-install/COMMITTED')))
 
-    def test_known_build_mapped_by_hand(self):
+    def test_install_known_build_without_fullscreen(self):
         # a known build the HMI scan's patterns do not cover, without Full-screen CarPlay (as ID5_1607-490-1610T Build 153)
         s = self.script.read_text()
         start = s.index("supported_table() {\n    cat <<'EOF'\n") + len("supported_table() {\n    cat <<'EOF'\n")
@@ -919,6 +1002,103 @@ class FromComputerTest(Base):
         (self.pl / 'CarPlayMenu.manifest').write_text('<plugin/>\n')
         self.assertIn('does not name the CarPlayMenu plugin', self.computer('install', rc=1))
         self.assertEqual(self.calls(), [])
+
+    # check (issue #7): read only, any generation; what decides full-screen CarPlay, as a report and an issue link
+    def assert_read_only(self):
+        self.assertFalse(self.p['STAGE'].exists())                                    # nothing uploaded
+        self.assertFalse(self.p['PLUGIN'].exists())
+        self.assertFalse(self.p['BACKUPS'].exists())
+        self.assertFalse((self.root / 'BACKUP').exists())
+        self.assertNotIn('appreset', ' '.join(self.calls()))
+
+    def check_report(self):
+        (rep,) = list(self.root.glob('CHECK-*.txt'))
+        return rep.read_text()
+
+    def test_check_unknown_id5_build(self):
+        version, elf_bytes, want = self.unknown_scannable()
+        self.p['LAYOUT_COMMON_ID5'].write_bytes(b'\x0aLT_State_CarPlay\x12IsCarPlayFullscreen screenW smallScreenW')
+        out = self.computer('check')
+        self.assert_read_only()
+        self.assertIn('HMI scan     complete', out)
+        n_fs = sum(1 for l in want if l.startswith('fs '))
+        self.assertIn('flag code found (%d words)' % n_fs, out)
+        self.assertIn('the full plugin can force the flag', out)
+        self.assertIn('BMW layout', out)
+        self.assertIn('LT_State_CarPlay keyed on IsCarPlayFullscreen', out)
+        self.assertIn('full screen is a state of that', out)
+        self.assertIn('MINI layout  not on this head unit', out)
+        self.assertIn('path-manager links', out)                                    # how the plugin undoes it
+        rep = self.check_report()
+        self.assertIn('HMI          ' + version, rep)
+        self.assertIn('HmiMain3D    sha256 ' + sha(elf_bytes), rep)
+        self.assertIn('build.tab:', rep)
+        self.assertIn(want[0], rep)
+        q = self.issue_link(out)
+        self.assertEqual(q['title'], ['Full-screen check: HMI ' + version])
+        self.assertIn('Known build  no (not in supported_table)', q['body'][0].splitlines())
+
+    def test_check_id6(self):
+        sig = bytes.fromhex('711c09e308009015003090e50c3093e533ff2fe1000050e30150a013')
+        self.p['HMI_VERSION_FILE'].write_bytes(b'NBTevo_Q18491I_Release Q_18491 Build 1')
+        self.p['HMI_BIN'].write_bytes(elf(b'iDrive 6 HMI ' + sig + b' rest', etype=2))
+        self.p['LAYOUT_COMMON_ID5'].write_bytes(b'\x0aLT_State_CarPlay\x12 vec3 844')
+        out = self.computer('check')
+        self.assert_read_only()
+        self.assertIn('Generation   iDrive 6', out)
+        self.assertIn('HMI scan     incomplete', out)                              # the scan runs on iDrive 6 too
+        self.assertIn('variant 0x9c71 (CARPLAY_FULLSCREEN) is coded', out)
+        self.assertIn('LT_State_CarPlay with a fixed width (no IsCarPlayFullscreen)', out)
+        self.assertNotIn('full screen is a state of that', out)
+        self.assertIn('coding it back', out)
+        self.assertNotIn('path-manager links', out)                                 # the plugin does no full screen here
+        self.assertNotIn('Install mode', out)
+        self.assertIn('Generation   iDrive 6', self.check_report())
+
+    def test_check_known_build(self):
+        out = self.computer('check')
+        self.assert_read_only()
+        self.assertIn('Known build  TEST_006', out)
+        self.assertIn("Known build TEST_006: the plugin's Full-screen CarPlay option", out)
+        self.assertIn('no LT_State_CarPlay', out)                                   # the made-up common layout of the tests
+
+    def test_check_layout_by_index_1607(self):
+        """1607-490 Build 153 names its states by index (no LT_State_CarPlay string): check recognises its CarPlay state (21238) and
+        whether the plugin's copy is already wide, instead of saying CarPlay's place comes from another layout."""
+        head = bytes.fromhex('0a0408f6a501')
+        slot = '08151002100210021a0b12090a072a051d0000%s1a0a0a0408cd870112022004'
+        for width, want in (('6144', 'CarPlay state by index (1607 format) with a fixed width'),
+                            ('b444', 'CarPlay state by index (1607 format), already full width')):
+            self.p['LAYOUT_COMMON_ID5'].write_bytes(b'\x0a\x10' + head + b'..' + bytes.fromhex(slot % width) + b'tail')
+            out = self.computer('check')
+            self.assertIn(want, out)
+            self.assertNotIn('no LT_State_CarPlay', out)
+
+    def mapped_by_hand(self):
+        # a known build the HMI scan's patterns do not cover and without Full-screen CarPlay (as ID5_1607-490-1610T Build 153)
+        s = self.script.read_text()
+        start = s.index("supported_table() {\n    cat <<'EOF'\n") + len("supported_table() {\n    cat <<'EOF'\n")
+        self.script.write_text(s[:start] + 'TEST_006 scan none\nTEST_006 fullscreen none\n' + s[start:])
+
+    def test_known_build_mapped_by_hand(self):
+        self.mapped_by_hand()
+        out = self.computer('install')
+        self.assertIn('Supported software: TEST_006', out)
+        self.assertIn("TEST_006 was mapped by hand (the HMI scan's patterns do not cover it)", out)
+        self.assertNotIn('does not agree with the built-in table', out)               # no request for a report
+        self.assertIn('Done: CarPlay Advanced Settings is installed', out)
+
+    def test_check_known_build_without_fullscreen(self):
+        self.mapped_by_hand()
+        out = self.computer('check')
+        self.assert_read_only()
+        self.assertIn('Known build  TEST_006', out)
+        self.assertIn('Known build TEST_006: the plugin has no Full-screen CarPlay for it yet', out)
+        self.assertNotIn("Full-screen CarPlay option uses its built-in addresses", out)
+
+    def test_check_is_for_computers(self):
+        out = self.run_script('check', rc=1)
+        self.assertIn('check runs from a computer', out)
 
     def test_status_and_uninstall_over_ssh(self):
         self.computer('install')
@@ -1181,9 +1361,10 @@ def b_word(at, to, op='ea'):
     return '%s%06x' % (op, ((to - at - 8) // 4) & 0xffffff)
 
 
-def synth_hmi(omit=(), twice=(), base=0x10000):
+def synth_hmi(omit=(), twice=(), base=0x10000, pressed='8'):
     """A made-up HmiMain3D: every "find" window of the installer's patterns laid out once (no firmware), the masked words filled
-    in so that the values are known. Returns the ELF bytes and the build.tab lines (without hmi) the scanner must print."""
+    in so that the values are known. Returns the ELF bytes and the build.tab lines (without hmi) the scanner must print. pressed: the
+    register the controller send's code uses for "pressed" (a token with a single masked digit), r8 as in 006 / 1703 by default."""
     finds, patches = {}, []
     for l in hmi_patterns():
         f = l.split()
@@ -1225,7 +1406,10 @@ def synth_hmi(omit=(), twice=(), base=0x10000):
             lay(name)
         if name in twice:
             lay(name, decoy=True)
-    words = [int(cells.get(k, 'ffffffff').replace('.', '0'), 16) for k in range(max(cells) + 1)]
+    def fill(t):
+        return t.replace('.', pressed) if t.count('.') == 1 else t.replace('.', '0')
+
+    words = [int(fill(cells.get(k, 'ffffffff')), 16) for k in range(max(cells) + 1)]
     for name, (k, v) in fields.items():
         if name in filled:
             s0, idx = filled[name]
@@ -1264,6 +1448,10 @@ def synth_hmi(omit=(), twice=(), base=0x10000):
         elif mode.startswith('b:'):
             other, d = mode[2:].split('+')
             new = b_word(a, anchor[other] + int(d, 16), new[:2])
+        elif mode[:1] == 'r':
+            d, at = int(mode[1]), mode[3:].split('+')
+            reg = '%08x' % word_at(anchor[at[0]] + int(at[1], 16))
+            new = new[:d - 1] + reg[7] + new[d:]
         out.append('%s %x %s %s' % (g, a, o, new))
     if not tilt:
         out.append('# tilt: not found (knob tilts off)')
@@ -1295,6 +1483,23 @@ class HmiScanTest(unittest.TestCase):
         self.assertEqual(out[0], 'hmi HMI test build')
         self.assertEqual(out[1:], want)
         self.assertTrue(any(l.startswith('fs ') for l in out) and any(l.startswith('tilt ') for l in out))
+
+    def test_pressed_register_r7(self):
+        """Issue #9 (1903-490 Build 41): the controller send keeps "pressed" in r7, where 006 and 1703 use r8. ctl and tB are still
+        found, and the two tilt words that store it use r7 too."""
+        for reg in '87':
+            elf, want = synth_hmi(pressed=reg)
+            out, _ = self.scan(elf)
+            self.assertEqual(out[1:], want, reg)
+            tilt = [l.split() for l in out if l.startswith('tilt ')]
+            self.assertEqual(len(tilt), 19)
+            news = [t[3] for t in tilt]
+            self.assertIn('978d%s10c' % reg, news)               # strls rX, [sp, ip, lsl #2]: the direction field
+            self.assertIn('01a0500%s' % reg, news)               # moveq r5, rX: the Voice field
+            other = '7' if reg == '8' else '8'
+            self.assertNotIn('978d%s10c' % other, news)
+            self.assertNotIn('01a0500%s' % other, news)
+            self.assertTrue(any(l.startswith('ctlSetFn ') for l in out))
 
     def test_branch_constraint_picks_the_right_copy(self):
         elf, want = synth_hmi(twice=('tC',))                     # a second tC window whose branch goes elsewhere
@@ -1335,6 +1540,63 @@ class HmiScanTest(unittest.TestCase):
             body = [l for l in out[1:] if not l.startswith('#')]
             self.assertEqual(body, want, build)
             self.assertEqual(sha(('\n'.join(body) + '\n').encode()), table[name], build)
+
+
+class HmiScan1903Test(unittest.TestCase):
+    """Issue #9: the scan of the F25 X3's HmiMain3D (1903-490-1837J Build 41, sha256 027cf939...), against the owner's static
+    analysis of the stock file. Only with CPA_HMI_1903 (never commit that file)."""
+    setUp, scan = HmiScanTest.setUp, HmiScanTest.scan
+
+    @unittest.skipUnless(os.environ.get('CPA_HMI_1903'), 'CPA_HMI_1903: the plain HmiMain3D of 1903-490-1837J Build 41')
+    def test_1903(self):
+        out, _ = self.scan(path=os.environ['CPA_HMI_1903'])
+        v = dict(l.split(' ', 1) for l in out if l and not l.startswith(('#', 'tilt ', 'fs ', 'hmi ')))
+        self.assertEqual({k: v[k] for k in ('touchFn', 'ctlSetFn', 'ctlProxy', 'playFn', 'playObj', 'tdFirst', 'tdEnd', 'tdTime',
+                                            'tdOrigin', 'pbw')},
+                         dict(touchFn='44d53c', ctlSetFn='2137d88', ctlProxy='4e60', playFn='2137ce8', playObj='52b0', tdFirst='4',
+                              tdEnd='8', tdTime='14', tdOrigin='18', pbw='2'))
+        tilt = {int(t[1], 16): (t[2], t[3]) for t in (l.split() for l in out if l.startswith('tilt '))}
+        self.assertEqual(len(tilt), 19)
+        tA, tB, tC = 0x44ea14, 0x44ebb4, 0x44f2ac
+        self.assertTrue({tA, tA + 4, tA + 8, tB, tB + 0x30, tB + 0x54, tB + 0x7c, tC} <= set(tilt))
+        self.assertEqual(tilt[tB + 0x10][0], 'e58d7000')                # str r7, [sp]: the original the patch replaces
+        self.assertEqual(tilt[tB + 0x1c][1], '978d710c')
+        self.assertEqual(tilt[tB + 0x24][1], '01a05007')
+        self.assertEqual(tilt[tC][1], 'ea' + b_word(tC, tB + 0x40)[2:])
+        self.assertFalse([l for l in out if l.startswith('fs ')])
+        # since 1.2.11 a known build (issue #10): its scan row is this output's hash; kBuilds adds the flag code the scan misses
+        rows = [l.split() for l in SOURCE.read_text().splitlines() if l.startswith('ID5_1903-490-1837J_Build_41 ')]
+        want = [r[2] for r in rows if r[1] == 'scan']
+        body = [l for l in out[1:] if not l.startswith('#')]
+        self.assertEqual([sha(('\n'.join(body) + '\n').encode())], want)
+
+
+
+class HmiScan1807Test(unittest.TestCase):
+    """ghackt/Carplay-advanced-installer issue #2: the scan of the BMW F11's HmiMain3D (1807-490-1809H Build 29, sha256
+    5e74cde5...) must give exactly kBuilds' values, flag code included. Only with CPA_HMI_1807 (never commit that file)."""
+    setUp, scan = HmiScanTest.setUp, HmiScanTest.scan
+
+    @unittest.skipUnless(os.environ.get('CPA_HMI_1807'), 'CPA_HMI_1807: the plain HmiMain3D of 1807-490-1809H Build 29')
+    def test_1807(self):
+        out, _ = self.scan(path=os.environ['CPA_HMI_1807'])
+        v = dict(l.split(' ', 1) for l in out if l and not l.startswith(('#', 'tilt ', 'fs ', 'hmi ')))
+        self.assertEqual({k: v[k] for k in ('touchFn', 'ctlSetFn', 'ctlProxy', 'playFn', 'playObj', 'tdFirst', 'tdEnd', 'tdTime',
+                                            'tdOrigin', 'pbw', 'pbwBmw')},
+                         dict(touchFn='43ef54', ctlSetFn='1fd9fe4', ctlProxy='4e60', playFn='1fd9f44', playObj='52b0', tdFirst='4',
+                              tdEnd='8', tdTime='14', tdOrigin='18', pbw='1', pbwBmw='1'))
+        tilt = [l.split()[1:] for l in out if l.startswith('tilt ')]
+        words = json.loads((HERE / 'src' / 'tilt_1807.json').read_text())['words']
+        self.assertEqual(tilt, [[w['addr'][2:], w['orig'], w['new']] for w in words])
+        fs = [tuple(int(x, 16) for x in l.split()[1:]) for l in out if l.startswith('fs ')]
+        cpm = (HERE / 'src' / 'cpm.cpp').read_text()
+        block = cpm[cpm.index('const Word kFsCode1807[] = {'):]
+        want = [tuple(int(x, 16) for x in t) for t in re.findall(r'\{ (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+) \}', block[:block.index('};')])]
+        self.assertEqual(fs, want)
+        rows = [l.split() for l in SOURCE.read_text().splitlines() if l.startswith('ID5_1807-490-1809H_Build_29 ')]
+        body = [l for l in out[1:] if not l.startswith('#')]
+        self.assertEqual([sha(('\n'.join(body) + '\n').encode())], [r[2] for r in rows if r[1] == 'scan'])
+
 
 
 def per_shell(cls):

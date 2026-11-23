@@ -8,7 +8,12 @@ ziploader, or the SWFL's opt/hmi/ID5/bin/HmiMain3D). The block it writes holds n
 instruction words with the build-dependent parts masked out ('.' = any hex digit), so it finds the same code in another build:
   * branch targets (B/BL), pc-relative loads, MOVW/MOVT immediates and pc-relative ADD/SUB are masked (they move between builds);
   * a word that differs between the two known builds in any other way is masked completely;
-  * the words the installer reads values from (CTouchData offsets) keep only their opcode: the offset itself is masked.
+  * the words the installer reads values from (CTouchData offsets) keep only their opcode: the offset itself is masked;
+  * in the controller send's windows (ctl, tB) the register that holds "pressed" (r8 in both known builds, r7 in 1903-490 Build 41,
+    issue #9) is masked where it is read: its digit is '.', and the tilt patch takes it from the code found (mode 'r<digit>:').
+  * not covered: in 1903-490 Build 41 the fullscreen window f5 differs from 006 (the activity in r5 instead of r4, and its first two
+    words), so the scan finds no flag code there; that build is in kBuilds with its own kFsCode1903 (issue #10). A pattern that also
+    covers it needs this tool's uniqueness check in 006 and 1703 (and fs_in), so it is left until the files are at hand.
 Each window grows from the anchor until it matches exactly one place in each known build, and it always ends in a word without a
 mask, which the installer's scanner (awk) uses as its lookup key. The scanner's own rules (which value comes from which word, see
 hmi_scan in carplay-advanced.sh) must agree with the RULES below.
@@ -53,8 +58,19 @@ def wild_mask(w):
     return (0, 0, 0, 0)
 
 
-def token(words, field=False):
-    """The pattern token for one position: 8 hex digits (big-endian, as od -tx4 prints the word), '.' for a masked digit."""
+def pressed_digit(w):
+    """The hex digit (1..8, as od prints the word) that names the "pressed" register (PRESSED) in a word of the controller send's
+    code, or None: STR rX, [sp, #imm12] and STR<cond> rX, [sp, ip, lsl #2] (Rt, digit 5), MOV<cond> rd, rX (Rm, digit 8)."""
+    if ((w & 0xffff0000) == 0xe58d0000 or (w & 0x0fff0fff) == 0x078d010c) and (w >> 12) & 0xf == PRESSED:
+        return 5
+    if (w & 0x0fff0ff0) == 0x01a00000 and w & 0xf == PRESSED:
+        return 8
+    return None
+
+
+def token(words, field=False, reg=False):
+    """The pattern token for one position: 8 hex digits (big-endian, as od -tx4 prints the word), '.' for a masked digit. reg: mask
+    the pressed register (pressed_digit) too."""
     w = words[0]
     if field:                                                    # a value is read from it: keep the opcode, mask the imm12
         return '%05x...' % (w >> 12)
@@ -65,7 +81,11 @@ def token(words, field=False):
         if x is not None:
             m = tuple(a | b for a, b in zip(m, wild_mask(x)))
     h = '%08x' % w
-    return ''.join('..' if m[3 - k] else h[2 * k:2 * k + 2] for k in range(4))
+    t = ''.join('..' if m[3 - k] else h[2 * k:2 * k + 2] for k in range(4))
+    d = pressed_digit(w) if reg else None
+    if d and t[d - 1] != '.':
+        t = t[:d - 1] + '.' + t[d:]
+    return t
 
 
 def regex(tokens):
@@ -75,11 +95,17 @@ def regex(tokens):
         b = bytes.fromhex(w)[::-1]                               # little-endian in the file
         for j in range(4):
             hexpair = t[6 - 2 * j:8 - 2 * j]
-            if '.' in hexpair:                                   # a masked byte (a field's half byte counts as masked)
-                parts.append(b'.')
+            if hexpair == '..' or (field_token(t) and '.' in hexpair):
+                parts.append(b'.')                               # a masked byte (a field's half byte counts as masked)
+            elif '.' in hexpair:                                 # one digit masked (the pressed register): its 16 values
+                parts.append(b'[' + b''.join(re.escape(bytes([int(hexpair.replace('.', '%x' % v), 16)])) for v in range(16)) + b']')
             else:
                 parts.append(re.escape(b[j:j + 1]))
     return re.compile(b''.join(parts), re.S)
+
+
+def field_token(t):
+    return t.endswith('...') and not t.endswith('....')
 
 
 def hits(rx, text):
@@ -115,7 +141,8 @@ def anchors():
 
 def patches():
     """patch lines: group anchor offset new mode. mode '=' writes new as it is; 'imm24' keeps the found word's branch offset (only the
-    condition changes); 'b:<anchor>+<offset>' is a branch to that address. orig is always the word the scanner found."""
+    condition changes); 'b:<anchor>+<offset>' is a branch to that address; 'r<d>:<anchor>+<offset>' puts the register of the found
+    word there (its last digit: the Rm of moveq r5, rX) into digit d of new. orig is always the word the scanner found."""
     t6 = json.load(open(os.path.join(ROOT, 'src', 'tilt_006.json')))['words']
     t7 = json.load(open(os.path.join(ROOT, 'src', 'tilt_1703.json')))['words']
     groups = (('tA', 0, 3), ('tB', 3, 18), ('tC', 18, 19))
@@ -127,12 +154,14 @@ def patches():
             off7 = int(y['addr'], 16) - int(t7[i0]['addr'], 16)
             assert off6 == off7, x
             o6, n6, o7, n7 = (int(v, 16) for v in (x['orig'], x['new'], y['orig'], y['new']))
-            if n6 == n7:
+            if n6 == n7 and pressed_digit(n6) is None:
                 mode, new = '=', n6
                 if (n6 >> 25) & 7 == 5:                       # a branch written as it is: its target must be inside tB's window
                     assert g == 'tB', x
             elif (n6 >> 24) == (n7 >> 24) and n6 & 0xffffff == o6 & 0xffffff and n7 & 0xffffff == o7 & 0xffffff:
                 mode, new = 'imm24', n6 & 0xff000000
+            elif n6 == n7:                                    # uses the pressed register: the one the found code uses
+                mode, new = 'r%d:%s' % (pressed_digit(n6), PRESSED_AT), n6
             else:                                             # a branch to a place that moved: find it as tB + offset
                 assert (n6 >> 25) & 7 == 5 and (n6 >> 24) == (n7 >> 24), x
                 t6a = branch_target(int(x['addr'], 16), n6) - int(t6[3]['addr'], 16)
@@ -168,6 +197,9 @@ FS_006 = ((0x43bbe0, 0xe5d00108, 0xe3a00001), (0x43bbfc, 0xe5d00108, 0xe3a00001)
 # anchor -> (word offset, anchor): the branch at that word must go to the other anchor (a window that alone is not unique)
 BRANCH_TO = {'tC': (4, 'tB')}
 MIN_FIXED = 8                                                    # words without a mask in every window
+PRESSED = 8                                                      # the "pressed" register of the controller send in 006 and 1703
+PRESSED_IN = ('ctl', 'tB')                                       # the windows where it is masked
+PRESSED_AT = 'tB+0x84'                                           # where the patch reads it: moveq r5, rX (the Voice field)
 
 
 def make(name, a6, a7, need, fields, b6, x6, b7, x7, found):
@@ -179,7 +211,7 @@ def make(name, a6, a7, need, fields, b6, x6, b7, x7, found):
         for k in range(-before, after + 1):
             w6 = word_at(b6, x6, a6 + 4 * k)
             w7 = word_at(b7, x7, a7 + 4 * k) if a7 is not None else None
-            toks.append(token([w6, w7], field=k in fields))
+            toks.append(token([w6, w7], field=k in fields, reg=name in PRESSED_IN))
         if sum('.' not in t for t in toks) >= MIN_FIXED:
             rx = regex(toks)
             h6 = keep(hits(rx, x6), b6, x6, before, bt, found, 0)

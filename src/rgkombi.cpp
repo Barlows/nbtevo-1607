@@ -9,6 +9,12 @@
 //     wait on the network).
 //   * every 500 ms: the state from rg_view_get(), while "CarPlay directions in HUD" is on (carplaymenu/hud_guidance), into
 //     kombi::Output (route graph, in-place updates, distance, lanes, cancel).
+//   * gaps in the guidance keep the arrow (1.3.1): iOS sends route state 0 between a reroute and the new route and for a moment during
+//     a route (mib2q-carplay-rgi: "periodically during active navigation"); each one cleared the KOMBI and drew the whole graph again,
+//     the arrow and lane row going off and on. Now the arrow stays up to kGapMs, as NBT-AAD's grace_s (car-proven, 8 s), before the
+//     cancel; Arrived (2), "CarPlay directions in HUD" off and a new session still end it at once. A maneuver whose own data has not
+//     arrived yet (0x5201 names it before its 0x5202) is waited for up to kUnknownMs instead of drawing a straight arrow for it.
+//   * the worker runs at priority 10 at most (it inherits the iAP2 reader thread's, and so did sloginfo): KOMBI frames are not urgent.
 //   * mm-ipod lives for one CarPlay session (Connectivity starts it per session). A session that ends with an arrow shown would leave
 //     it on the cluster, so while one is shown the file kMarker holds this process's pid, and a watcher (rg_watch_once in rghook.c,
 //     outliving mm-ipod) waits for the pid to end and then runs libcpprobe.so with CPM_CLEAR=<pid>: the factory cancel, only if the
@@ -77,6 +83,8 @@ const char *const kMarker = RG_KOMBI_MARKER;
 
 kombi::Output g_out;
 volatile int g_started;
+const u32 kGapMs = 8000;      // guidance gap kept on the KOMBI (NBT-AAD grace_s)
+const u32 kUnknownMs = 3000;  // a current maneuver without its data waited for
 
 #ifdef KOMBI_HOST
 u32 nowMs() {
@@ -275,6 +283,11 @@ struct Slog {
 void *worker(void *) {
   kombi::g_log = rg_log_line;
   kombi::g_debug = rg_debug_log;
+  {
+    int was = rg_lower_priority(10);
+    if (was > 10)
+      logLine("kombi: worker priority %s%d -> 10", "", was);
+  }
   g_out.init();
   const char *a = env("RGHOOK_KOMBI");
   u8 ip[4];
@@ -287,16 +300,21 @@ void *worker(void *) {
   char enabled[160];
   snprintf(enabled, sizeof enabled, "%s/hud_guidance", cfg ? cfg : kCfg);
   rg_log_line("kombi: CarPlay directions to the Ethernet KOMBI (SOME/IP 0xB006), from mm-ipod");
-  {  // test switch kombi_road_max: the street's length in characters, 8..60 (kombi.h shortRoad); read once per CarPlay session
+  {  // The street's width in the windscreen HUD (kombi.h fitRoad), read once per CarPlay session. kombi_road_ruler: a row of digits
+     // instead of every street; kombi_road_max: how many of them the HUD showed whole, 8..60 (else kombi::kRoadDigits)
     char p[170], nb[16];
     snprintf(p, sizeof p, "%s/kombi_road_max", cfg ? cfg : kCfg);
     int n = rg_file_read(p, nb, sizeof nb);
     u32 val = 0;
     for (int q = 0; q < n && q < 3 && nb[q] >= '0' && nb[q] <= '9'; q++)
       val = val * 10 + (u32)(nb[q] - '0');
-    kombi::g_roadMax = val >= 8 && val <= 60 ? val : 0;
-    if (kombi::g_roadMax)
-      logLine("kombi: street at most %s%d characters (kombi_road_max)", "", (int)val);
+    kombi::g_roadDigits = val >= 8 && val <= 60 ? val : 0;
+    if (kombi::g_roadDigits)
+      logLine("kombi: street at most %s%d digits wide (kombi_road_max)", "", (int)val);
+    snprintf(p, sizeof p, "%s/kombi_road_ruler", cfg ? cfg : kCfg);
+    kombi::g_ruler = exists(p);
+    if (kombi::g_ruler)
+      rg_log_line("kombi: digits instead of the street (kombi_road_ruler): the count of whole ones in the HUD goes into kombi_road_max");
   }
   char mine[16];
   snprintf(mine, sizeof mine, "%d\n", (int)getpid());
@@ -311,14 +329,30 @@ void *worker(void *) {
     if (ok)
       rg_file_unlink(marker);
   }
-  bool watching = false, prevHave = false, yielded = false;
+  bool watching = false, prevHave = false, yielded = false, everActive = false, inGap = false, waiting = false;
+  u32 lastActive = 0, waitSince = 0, waitIdx = 0;
   static Slog slog;
   slog.init();
   for (;;) {
     usleep(500000);
     rg_view v;
-    bool on = exists(enabled), got = on && rg_view_get(&v), have = got && v.active;
     u32 now = nowMs();
+    bool on = exists(enabled), got = on && rg_view_get(&v), active = got && v.active;
+    if (active) {
+      lastActive = now;
+      everActive = true;
+    }
+    // 1.4.6 (ghackt issue #5, G30 rghook.log: route state 1, 0, 3, 0, 3, 0, 3, 1, ... all through a route): Loading / Locating
+    // within a route is the route going on, so it restarts the gap's 8 s too. Until 1.4.6 only Route Set did, the time in Loading
+    // counted, and a route that kept going 0 / 3 / 0 was "ended" every few seconds: the arrow went off until the next maneuver.
+    if (got && everActive && v.hold)
+      lastActive = now;
+    // a gap: not guiding now, but it was less than kGapMs ago and the route did not end (Arrived) or wait (Loading / Locating)
+    bool gap = !active && got && everActive && !v.hold && v.rs != 2 && now - lastActive < kGapMs;
+    bool have = active || gap;
+    // within a route (a gap, or Loading / Locating after guidance): the arrow is kept and still updated from what the
+    // iPhone sends (distance, the next maneuver), as while guiding (1.4.6); before, nothing was sent until Route Set came back
+    bool within = gap || (got && everActive && v.hold && v.rs != 2);
     slog.poll(now);
     bool started = have && !prevHave;
     prevHave = have;
@@ -340,8 +374,30 @@ void *worker(void *) {
       rg_log_line("kombi: BMW route ended: CarPlay arrows back");
       yielded = false;
     }
-    if (!have && got && v.hold && g_out.shown)
+    if (!have && !within && got && v.hold && g_out.shown)
       continue;  // Loading / Locating between routes: keep the last arrow
+    if (within) {
+      if (!inGap && g_out.shown && rg_debug_log())
+        logLine("kombi: guidance gap (route state %s%d): the arrow stays", "", (int)v.rs);
+      inGap = true;
+      if (!v.known || !g_out.shown || (!v.dist && !v.dist_s[0]))
+        continue;  // nothing to update (or no distance: never a "0 m" from a no-route message): the KOMBI keeps what it shows
+    } else {
+      if (inGap && !active && g_out.shown)
+        rg_log_line("kombi: guidance gap longer than 8 s: route ended");
+      inGap = false;
+    }
+    if (active && !v.known) {  // the maneuver named before its data: wait a little rather than draw a straight arrow for it
+      if (!waiting || waitIdx != v.index) {
+        waiting = true;
+        waitIdx = v.index;
+        waitSince = now;
+      }
+      if (now - waitSince < kUnknownMs)
+        continue;
+    } else
+      waiting = false;
+    have = active || within;
     static kombi::Man m;
     if (have)
       kombi::manOf(v, m);

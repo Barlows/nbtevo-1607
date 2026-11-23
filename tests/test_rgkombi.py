@@ -26,19 +26,34 @@ HARNESS = r'''
 #undef write
 extern int open(const char *, int, ...); extern int close(int); extern long write(int, const void *, unsigned long);
 extern long read(int, void *, unsigned long); extern int unlink(const char *); extern int rename(const char *, const char *);
-extern long strtol(const char *, char **, int); extern char *fgets(char *, int, void *); extern void *__stdinp;
+extern long strtol(const char *, char **, int); extern char *fgets(char *, int, void *);
+#ifdef __APPLE__
+extern void *__stdinp, *__stdoutp;
+#define H_IN __stdinp
+#define H_OUT __stdoutp
+#else
+extern void *stdin, *stdout;
+#define H_IN stdin
+#define H_OUT stdout
+#endif
+
 extern int strncmp(const char *, const char *, unsigned long);
-extern int usleep(unsigned); extern int fflush(void *); extern int printf(const char *, ...); extern void *__stdoutp;
-static int mac_open(const char *p, int f, ...) { return f ? open(p, 0x601 /* O_WRONLY|O_CREAT|O_TRUNC */, 0644) : open(p, 0); }
+extern int usleep(unsigned); extern int fflush(void *); extern int printf(const char *, ...);
+#ifdef __APPLE__
+#define HOST_WCT 0x601 /* O_WRONLY|O_CREAT|O_TRUNC on the Mac */
+#else
+#define HOST_WCT 0x241 /* ... on Linux */
+#endif
+static int mac_open(const char *p, int f, ...) { return f ? open(p, HOST_WCT, 0644) : open(p, 0); }
 static long mac_write(int fd, const void *b, size_t n) { return write(fd, b, n); }
 static long mac_read(int fd, void *b, size_t n) { return read(fd, b, n); }
 int spawnle(int m, const char *p, const char *a, ...) { (void)m; (void)p; (void)a; return -1; }   /* QNX only: the watcher */
 static int hexv(char c) { return c >= '0' && c <= '9' ? c - '0' : c - 'a' + 10; }
 int main(void) {             /* stdin: "msg <id hex> <payload hex>", "sleep <ms>" */
   r_open = mac_open; r_write = (long (*)(int, const void *, size_t))mac_write; r_read = (long (*)(int, void *, size_t))mac_read;
-  r_close = close; r_unlink = unlink; r_rename = rename; inited = 1;
+  r_close = close; r_unlink = unlink; inited = 1;
   char line[8192];
-  while (fgets(line, sizeof line, __stdinp)) {
+  while (fgets(line, sizeof line, H_IN)) {
     if (!strncmp(line, "sleep ", 6)) usleep((unsigned)strtol(line + 6, 0, 10) * 1000);
     else if (!strncmp(line, "msg ", 4)) {
       char *e; u32 mid = (u32)strtol(line + 4, &e, 16); while (*e == ' ') e++;
@@ -46,7 +61,7 @@ int main(void) {             /* stdin: "msg <id hex> <payload hex>", "sleep <ms>
       for (const char *h = e; h[0] > ' ' && h[1] > ' ' && n < sizeof b; h += 2) b[n++] = (u8)(hexv(h[0]) << 4 | hexv(h[1]));
       on_rg(mid, b, n);
     }
-    printf("ok\n"); fflush(__stdoutp);
+    printf("ok\n"); fflush(H_OUT);
   }
   return 0;
 }
@@ -162,13 +177,75 @@ class RgKombi(unittest.TestCase):
         self.assertEqual([r['method'] for r in reqs], [0xA])
         self.assertEqual(self.text_at_bom(reqs[0]['body'])[0], '400')
 
-        self.msg(0x5201, update(state=3))                                 # Loading: the arrow stays
+        self.msg(0x5201, update(state=3, metres=400, text='400 m'))       # Loading: the arrow stays
         time.sleep(1.2)
         self.assertEqual(self.k.take(), [])
         self.msg(0x5201, update(state=2))                                 # Arrived: the factory cancel
         reqs = self.wait_requests(6)
         self.assertEqual([r['session'] for r in reqs], list(range(400, 406)))
         self.assertFalse(self.marker.exists())
+
+    def test_guidance_gap_keeps_the_arrow(self):
+        """1.3.1: iOS's route state 0 between a reroute and the new route (and for a moment during a route) no longer clears the
+        KOMBI and draws the whole graph again; one that lasts longer than 8 s ends the route"""
+        self.start()
+        self.msg(0x5202, maneuver(0, 1, 'Main Street'))
+        self.msg(0x5201, update())
+        self.assertEqual(len(self.wait_requests(97)), 97)
+        self.msg(0x5201, update(state=5))                                 # rerouting
+        time.sleep(0.7)
+        self.msg(0x5201, update(state=0))                                 # the reset frame
+        time.sleep(1.6)
+        self.assertEqual(self.k.take(), [])                               # no cancel
+        self.msg(0x5202, maneuver(0, 1, 'Main Street'))
+        self.msg(0x5201, update(metres=400, text='400 m'))                # the new route, same turn
+        reqs = self.wait_requests(1)
+        self.assertEqual([r['method'] for r in reqs], [0xA])              # a distance update only, no whole graph
+        self.msg(0x5201, update(state=0, metres=400, text='400 m'))       # the route ended in CarPlay
+        time.sleep(6.5)
+        self.assertEqual(self.k.take(), [])
+        reqs = self.wait_requests(6, timeout=4)                           # cleared after 8 s
+        self.assertEqual([r['session'] for r in reqs], list(range(400, 406)))
+        self.assertFalse(self.marker.exists())
+
+    def test_loading_and_no_route_flapping_within_a_route(self):
+        """1.4.6, ghackt issue #5 (G30 rghook.log): iOS went 1, 0, 3, 0, 3, 0, ... through a route; the time in Loading counted
+        towards the 8 s and the arrow was cleared until the next maneuver. Now it stays, its distance still updated; and a distance
+        of 0 from such a message is not shown."""
+        self.start()
+        self.msg(0x5202, maneuver(0, 1, 'Main Street'))
+        self.msg(0x5201, update())
+        self.assertEqual(len(self.wait_requests(97)), 97)
+        for k in range(6):                                                # 12 s of 0 / 3 / 0 / 3 without Route Set
+            self.msg(0x5201, update(state=0, metres=450, text='450 m'))
+            time.sleep(1.0)
+            self.msg(0x5201, update(state=3, metres=450, text='450 m'))
+            time.sleep(1.0)
+        self.assertEqual(self.k.take(), [])                               # no cancel, nothing sent
+        self.assertNotIn('route ended', self.logtext())
+        self.msg(0x5201, update(state=3, metres=300, text='300 m'))       # the distance goes on in Loading
+        reqs = self.wait_requests(1)
+        self.assertEqual([r['method'] for r in reqs], [0xA])
+        self.assertEqual(self.text_at_bom(reqs[0]['body'])[0], '300')
+        self.msg(0x5201, update(state=0, metres=0, text=''))              # no distance: not drawn as "0 m"
+        time.sleep(1.2)
+        self.assertEqual(self.k.take(), [])
+        self.msg(0x5201, update(state=1, metres=250, text='250 m'))       # Route Set again: no whole graph, the distance
+        reqs = self.wait_requests(1)
+        self.assertEqual([r['method'] for r in reqs], [0xA])
+        self.assertEqual(self.text_at_bom(reqs[0]['body'])[0], '250')
+
+    def test_maneuver_data_waited_for(self):
+        """1.3.1: a maneuver named before its data arrived is not drawn as a straight arrow first"""
+        self.start()
+        self.msg(0x5201, update())                                        # maneuver 0 named, its 0x5202 not here yet
+        time.sleep(1.2)
+        self.assertEqual(self.k.take(), [])
+        self.msg(0x5202, maneuver(0, 1, 'Main Street'))
+        reqs = self.wait_requests(97)
+        self.assertEqual(len(reqs), 97)
+        m0 = [r for r in reqs if r['method'] == 0xA and r['body'][8] == 15 and r['body'][5:8] == b'\0\0\0']
+        self.assertEqual({r['body'][33] for r in m0}, {6})                # the left turn, not a straight arrow first
 
     def test_switched_off(self):
         self.start()
@@ -202,18 +279,28 @@ class RgKombi(unittest.TestCase):
         self.msg(0x5202, maneuver(0, 23, 'I-95 North') + tlv(2, b'Take exit 23B onto I-95 North\0'))
         self.msg(0x5201, update())
         reqs = self.wait_requests(97)
-        self.assertEqual(self.street_of(reqs), {'Exit 23B  I-95 North'})
+        self.assertEqual(self.street_of(reqs), {'Exit 23B  I-95 N'})                    # 1.3.5: fitted to the HUD's width
         self.msg(0x5202, maneuver(1, 23, 'Route 9') + tlv(2, b'Take the exit\0') + tlv(13, b'Exit 7A\0'))
         self.msg(0x5201, update(idx=1))                                  # same arrow, new street: drawn 4 s after the graph
         self.assertEqual(self.street_of(self.wait_requests(9, timeout=8)), {'Exit 7A  Route 9'})
 
     def test_road_max_switch(self):
+        # kombi_road_max: the HUD's width in digits (8 = 4170 / 1000 em): "Main Street" (5113) gets its USPS suffix
         (self.cfg / 'kombi_road_max').write_text('8\n')
         self.start()
         self.msg(0x5202, maneuver(0, 1, 'Main Street'))
         self.msg(0x5201, update())
-        self.assertEqual(self.street_of(self.wait_requests(97)), {'Main St'})
-        self.assertIn('kombi: street at most 8 characters (kombi_road_max)', self.logtext())
+        self.assertEqual(self.street_of(self.wait_requests(97)), {'Main ST'})
+        self.assertIn('kombi: street at most 8 digits wide (kombi_road_max)', self.logtext())
+
+    def test_road_ruler_switch(self):
+        # kombi_road_ruler (an empty file will do): 40 digits instead of the street, to count the ones the HUD shows whole
+        (self.cfg / 'kombi_road_ruler').write_text('')
+        self.start()
+        self.msg(0x5202, maneuver(0, 23, 'Main Street') + tlv(2, b'Take exit 104 onto Main Street\0'))
+        self.msg(0x5201, update())
+        self.assertEqual(self.street_of(self.wait_requests(97)), {'1234567890' * 4})
+        self.assertIn('kombi: digits instead of the street (kombi_road_ruler)', self.logtext())
 
     def bmw(self, *lines):
         with self.slog.open('a') as f:
